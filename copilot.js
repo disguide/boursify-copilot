@@ -1,27 +1,33 @@
 /**
- * Boursify 20% Total Portfolio Sizer, Price-vs-Average & Raw News Terminal (SBG 2026)
+ * Boursify 20% Total Portfolio Sizer & Multi-Point Price Tracker (SBG 2026)
  *
- * Pure numbers & raw news — zero handbook clues, zero AI/script BUY/SELL opinions:
- *  1. 20% of TOTAL PORTFOLIO VALUE share calculator for all 10 stocks live.
- *  2. Price Movement vs. Average (shows Live Price, Average Price, % Deviation from Average
- *     so you immediately spot when a stock is down below its average to bet on mean reversion,
- *     plus 60s % move and Low–High range).
- *  3. Clean Raw Breaking News feed (newest first, scroll-safe).
+ * Pure price data & 20% Total Portfolio Value sizer — no news feed, no handbook text:
+ *  - Shows all 10 stocks on screen at once (no scrolling needed).
+ *  - Multi-point price metrics per stock:
+ *      * Live Price ($XX.XX)
+ *      * % vs Average (MA50 / Session Mean) + % vs Start Price
+ *      * % off High (drawdown from peak) & % off Low (bounce from bottom)
+ *      * Visual Low–High Range Bar (0% = at Low, 100% = at High)
+ *      * Multi-timeframe momentum: 30s %, 1m %, 3m %
+ *      * Clear DIP / PEAK action tag (DOWN vs Avg -> BUY DIP; UP vs Avg -> SHORT/SELL)
+ *  - 1-click Sort: Default | Most Down ▼ | Most Up ▲
+ *  - 20% of Total Portfolio Value share calculator (with B / S / Exit pre-fill buttons when Pre-fill: ON).
  */
 (() => {
   if (window.__BOURSIFY_COPILOT__) {
     window.__BOURSIFY_COPILOT__.destroy();
   }
 
-  const STORAGE_KEY = 'boursify_copilot_cfg_v4';
+  const STORAGE_KEY = 'boursify_copilot_cfg_v5';
   const defaultCfg = {
     simId: '448',
     playerId: '38158',
-    pollMs: 2500,
+    pollMs: 2000,
     prefillEnabled: false,
     allocPct: 20,       // 20% of TOTAL PORTFOLIO VALUE
-    roundMode: true,    // Clean round share numbers for fast typing
-    wideMode: false,
+    roundMode: true,
+    sortMode: 'DEFAULT', // 'DEFAULT' | 'DOWN' | 'UP'
+    wideMode: true,
     minimized: false,
   };
 
@@ -68,21 +74,16 @@
 
   const state = {
     products: [],
-    priceHistory: {},      // { sym: [{ t, p }] } last 60s
+    priceHistory: {},      // { sym: [{ t, p }] } up to 3 minutes
     sessionStats: {},      // { sym: { sum, count, min, max } }
     cash: 1000000,
     totalValue: 1000000,
     holdings: {},          // { sym: { qty, avgPrice } }
-    seenEvents: new Set(),
-    newsList: [],          // [{ id, timeLabel, headline }]
-    newsVersion: 0,
     lastPollAt: null,
     lastError: null,
     statusMsg: '',
     timer: null,
   };
-
-  let lastRenderedNewsVersion = -1;
 
   const esc = (s) =>
     String(s ?? '')
@@ -97,31 +98,68 @@
     return res.json();
   };
 
-  const getChg60s = (sym, currentPrice) => {
+  // Get % price change over lookbackMs (e.g. 30000, 60000, 180000)
+  const getChgWindow = (sym, currentPrice, lookbackMs) => {
     const hist = state.priceHistory[sym] || [];
-    const baseP = hist.length > 1 ? hist[0].p : currentPrice;
-    return baseP > 0 ? ((currentPrice - baseP) / baseP) * 100 : 0;
+    if (hist.length < 2) return 0;
+    const cutoff = Date.now() - lookbackMs;
+    let ref = hist[0].p;
+    for (let i = hist.length - 1; i >= 0; i--) {
+      if (hist[i].t <= cutoff) {
+        ref = hist[i].p;
+        break;
+      }
+    }
+    return ref > 0 ? ((currentPrice - ref) / ref) * 100 : 0;
   };
 
-  // Compute reference Average Price (blends Boursify MA50 / Start Price with live session mean)
-  const getAverageStats = (p) => {
+  // Compute comprehensive price data points for a stock
+  const getPriceMetrics = (p) => {
     const sym = p.short_name || p.ticker || '?';
     const price = Number(p.current_price || 0);
     const m = p.marketable || {};
     const startP = Number(m.starting_price || START_PRICES[sym] || price);
     const ma50 = Number(m.moving_average_50_days || 0);
+    const ma200 = Number(m.moving_average_200_days || 0);
     const st = state.sessionStats[sym];
     const sessionAvg = st && st.count > 0 ? st.sum / st.count : price;
 
-    // Reference average: use MA50 if available & valid, blended with session average / start price
+    // Reference Average: blend MA50 (if valid), Start Price, and Session Average
     const refAvg = ma50 > 0 ? (ma50 + sessionAvg) / 2 : (startP + sessionAvg) / 2;
     const vsAvgPct = refAvg > 0 ? ((price - refAvg) / refAvg) * 100 : 0;
     const vsStartPct = startP > 0 ? ((price - startP) / startP) * 100 : 0;
+    const vsMa50Pct = ma50 > 0 ? ((price - ma50) / ma50) * 100 : vsAvgPct;
 
-    const hi = Math.max(price, Number(m.highest_price || 0), st?.max || price);
-    const lo = Math.min(price, Number(m.lowest_price || price) || price, st?.min || price);
+    const hi = Math.max(price, startP, Number(m.highest_price || 0), st?.max || price);
+    const lo = Math.min(price, startP, Number(m.lowest_price || price) || price, st?.min || price);
+    const offHighPct = hi > 0 ? ((price - hi) / hi) * 100 : 0; // negative (how far down from peak)
+    const offLowPct = lo > 0 ? ((price - lo) / lo) * 100 : 0;  // positive (how far up from bottom)
+    const rangePos = hi > lo ? Math.max(0, Math.min(100, ((price - lo) / (hi - lo)) * 100)) : 50;
 
-    return { refAvg, vsAvgPct, vsStartPct, hi, lo };
+    const chg30s = getChgWindow(sym, price, 30000);
+    const chg1m = getChgWindow(sym, price, 60000);
+    const chg3m = getChgWindow(sym, price, 180000);
+
+    return {
+      sym,
+      price,
+      startP,
+      ma50,
+      ma200,
+      sessionAvg,
+      refAvg,
+      vsAvgPct,
+      vsStartPct,
+      vsMa50Pct,
+      hi,
+      lo,
+      offHighPct,
+      offLowPct,
+      rangePos,
+      chg30s,
+      chg1m,
+      chg3m,
+    };
   };
 
   const roundShares = (rawQty) => {
@@ -152,7 +190,7 @@
     el.dispatchEvent(new Event('change', { bubbles: true }));
   };
 
-  const prefillTradeForm = ({ productId, ticker, qty }) => {
+  const prefillTradeForm = ({ side, productId, ticker, qty }) => {
     if (!cfg.prefillEnabled) return;
     const select =
       document.querySelector('select[name="financial_product_id"]') ||
@@ -164,41 +202,50 @@
       return;
     }
 
-    const sel =
-      form.querySelector('select[name="financial_product_id"]') ||
-      form.querySelector('select');
-    if (sel) {
-      let targetVal = productId ? String(productId) : '';
-      const opts = Array.from(sel.options || []);
-      if (!opts.some((o) => o.value === targetVal) && ticker) {
-        const byTicker = opts.find((o) => o.textContent.toUpperCase().includes(ticker.toUpperCase()));
-        if (byTicker) targetVal = byTicker.value;
+    if (side) {
+      const buttons = Array.from(form.querySelectorAll('button[type="button"]'));
+      const targets = side === 'BUY' ? ['buy', 'acheter'] : ['sell', 'vendre'];
+      const sideBtn = buttons.find((b) => targets.includes(b.textContent.trim().toLowerCase()));
+      if (sideBtn) sideBtn.click();
+    }
+
+    setTimeout(() => {
+      const sel =
+        form.querySelector('select[name="financial_product_id"]') ||
+        form.querySelector('select');
+      if (sel) {
+        let targetVal = productId ? String(productId) : '';
+        const opts = Array.from(sel.options || []);
+        if (!opts.some((o) => o.value === targetVal) && ticker) {
+          const byTicker = opts.find((o) => o.textContent.toUpperCase().includes(ticker.toUpperCase()));
+          if (byTicker) targetVal = byTicker.value;
+        }
+        if (targetVal) setNativeValue(sel, targetVal);
       }
-      if (targetVal) setNativeValue(sel, targetVal);
-    }
 
-    const qtyInput =
-      form.querySelector('input[name="quantity"]') ||
-      form.querySelector('input[type="number"]');
-    if (qtyInput && qty > 0) {
-      setNativeValue(qtyInput, qty);
-    }
+      const qtyInput =
+        form.querySelector('input[name="quantity"]') ||
+        form.querySelector('input[type="number"]');
+      if (qtyInput && qty > 0) {
+        setNativeValue(qtyInput, qty);
+      }
 
-    state.statusMsg = `Filled ${ticker} × ${qty}`;
-    renderHeader();
+      state.statusMsg = `Filled ${side || ''} ${ticker} × ${qty}`.trim();
+      renderHeader();
+    }, 50);
   };
 
   // --- Static DOM Shell ---
   const root = document.createElement('div');
   root.id = 'boursify-copilot-root';
   const applyWidth = () => {
-    root.style.width = cfg.wideMode ? '620px' : '460px';
+    root.style.width = cfg.wideMode ? '650px' : '490px';
   };
   root.style.cssText = [
     'position:fixed', 'bottom:14px', 'right:14px', 'z-index:999999',
-    'max-height:88vh', 'display:flex', 'flex-direction:column',
+    'max-height:90vh', 'display:flex', 'flex-direction:column',
     'background:#0f172a', 'color:#f8fafc', 'border:1px solid #334155',
-    'border-radius:12px', 'box-shadow:0 12px 32px rgba(0,0,0,0.5)',
+    'border-radius:12px', 'box-shadow:0 12px 32px rgba(0,0,0,0.55)',
     'font-family:system-ui,-apple-system,sans-serif', 'font-size:12px', 'overflow:hidden',
   ].join(';');
   applyWidth();
@@ -206,7 +253,7 @@
   root.innerHTML = `
     <div id="bc-drag-handle" style="display:flex;justify-content:space-between;align-items:center;padding:9px 12px;background:#1e293b;border-bottom:1px solid #334155;cursor:move;user-select:none;">
       <div style="min-width:0;padding-right:8px;">
-        <div style="font-weight:700;font-size:13px;">Boursify Portfolio Sizer & Price Tracker <span style="color:#38bdf8">#${esc(cfg.simId)}</span> <span id="bc-status-msg" style="font-size:10px;color:#4ade80;"></span></div>
+        <div style="font-weight:700;font-size:13px;">Boursify 20% Portfolio Sizer & Price Radar <span style="color:#38bdf8">#${esc(cfg.simId)}</span> <span id="bc-status-msg" style="font-size:10px;color:#4ade80;"></span></div>
         <div id="bc-cash-line" style="color:#94a3b8;font-size:10px;">Total: $1,000,000 · Cash: $1,000,000</div>
       </div>
       <div style="display:flex;gap:5px;align-items:center;flex-shrink:0;">
@@ -216,29 +263,28 @@
       </div>
     </div>
     <div id="bc-body" style="padding:9px 12px;display:flex;flex-direction:column;gap:7px;overflow:hidden;flex:1;">
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;background:#1e293b;padding:5px 8px;border-radius:6px;flex-wrap:wrap;">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;background:#1e293b;padding:6px 8px;border-radius:6px;flex-wrap:wrap;">
         <div style="display:flex;align-items:center;gap:4px;">
           <span style="font-size:11px;color:#e2e8f0;font-weight:600;">Portfolio %:</span>
-          <input id="bc-alloc" type="number" min="1" max="100" value="${cfg.allocPct}" style="width:44px;background:#0f172a;color:#38bdf8;font-weight:700;border:1px solid #475569;border-radius:4px;padding:2px 4px;">
+          <input id="bc-alloc" type="number" min="1" max="100" value="${cfg.allocPct}" style="width:42px;background:#0f172a;color:#38bdf8;font-weight:700;border:1px solid #475569;border-radius:4px;padding:2px 4px;">
           <button data-pct="10" style="background:#334155;color:#cbd5e1;border:none;border-radius:3px;padding:2px 5px;cursor:pointer;font-size:10px;">10%</button>
           <button data-pct="20" style="background:#334155;color:#cbd5e1;border:none;border-radius:3px;padding:2px 5px;cursor:pointer;font-size:10px;">20%</button>
           <button data-pct="30" style="background:#334155;color:#cbd5e1;border:none;border-radius:3px;padding:2px 5px;cursor:pointer;font-size:10px;">30%</button>
           <button data-pct="40" style="background:#334155;color:#cbd5e1;border:none;border-radius:3px;padding:2px 5px;cursor:pointer;font-size:10px;">40%</button>
         </div>
         <span id="bc-budget-pill" style="color:#38bdf8;font-weight:700;font-size:11px;">= $200,000</span>
-        <button id="bc-toggle-round" style="background:#2563eb;color:#e2e8f0;border:none;border-radius:4px;padding:2px 7px;cursor:pointer;font-size:10px;">Round: ON</button>
+        <div style="display:flex;gap:4px;">
+          <button id="bc-sort" style="background:#334155;color:#e2e8f0;border:none;border-radius:4px;padding:2px 7px;cursor:pointer;font-size:10px;font-weight:600;">Sort: Default</button>
+          <button id="bc-toggle-round" style="background:#2563eb;color:#e2e8f0;border:none;border-radius:4px;padding:2px 7px;cursor:pointer;font-size:10px;">Round: ON</button>
+        </div>
       </div>
-      <div style="display:grid;grid-template-columns:1.05fr 1.55fr 0.95fr;font-weight:700;font-size:10px;color:#94a3b8;padding:0 2px;">
-        <span>STOCK (HELD)</span>
-        <span style="text-align:right;">PRICE · VS AVG · 60s</span>
+      <div style="display:grid;grid-template-columns:0.85fr 1.15fr 1.15fr 1.05fr;font-weight:700;font-size:10px;color:#94a3b8;padding:0 2px;">
+        <span>STOCK / HELD</span>
+        <span style="text-align:right;">PRICE · AVG · START</span>
+        <span style="text-align:right;">HOW DOWN / UP (RANGE)</span>
         <span id="bc-col-sh-hdr" style="text-align:right;">${cfg.allocPct}% PORT SHARES</span>
       </div>
-      <div id="bc-quotes-list" style="overflow-y:auto;max-height:270px;padding-right:2px;"></div>
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:2px;">
-        <span style="font-weight:700;font-size:11px;color:#94a3b8;">LIVE NEWS (NEWEST FIRST)</span>
-        <span id="bc-news-count" style="font-size:10px;color:#64748b;">0 items</span>
-      </div>
-      <div id="bc-news-list" style="overflow-y:auto;max-height:220px;padding-right:2px;"></div>
+      <div id="bc-quotes-list" style="overflow-y:auto;max-height:540px;padding-right:2px;"></div>
     </div>
   `;
   document.body.appendChild(root);
@@ -251,11 +297,10 @@
   const elBody = root.querySelector('#bc-body');
   const elAlloc = root.querySelector('#bc-alloc');
   const elBudgetPill = root.querySelector('#bc-budget-pill');
+  const elSortBtn = root.querySelector('#bc-sort');
   const elRoundBtn = root.querySelector('#bc-toggle-round');
   const elColShHdr = root.querySelector('#bc-col-sh-hdr');
   const elQuotesList = root.querySelector('#bc-quotes-list');
-  const elNewsCount = root.querySelector('#bc-news-count');
-  const elNewsList = root.querySelector('#bc-news-list');
   const elHandle = root.querySelector('#bc-drag-handle');
 
   const renderHeader = () => {
@@ -274,6 +319,13 @@
     elColShHdr.textContent = `${pct}% PORT SHARES`;
     elRoundBtn.textContent = `Round: ${cfg.roundMode ? 'ON' : 'Exact'}`;
     elRoundBtn.style.background = cfg.roundMode ? '#2563eb' : '#334155';
+    elSortBtn.textContent =
+      cfg.sortMode === 'DOWN'
+        ? 'Sort: Most Down ▼'
+        : cfg.sortMode === 'UP'
+        ? 'Sort: Most Up ▲'
+        : 'Sort: Default';
+    elSortBtn.style.background = cfg.sortMode === 'DEFAULT' ? '#334155' : '#2563eb';
     elWideBtn.style.background = cfg.wideMode ? '#2563eb' : '#334155';
 
     elPrefillBtn.textContent = `Pre-fill: ${cfg.prefillEnabled ? 'ON' : 'OFF'}`;
@@ -282,102 +334,116 @@
     elBody.style.display = cfg.minimized ? 'none' : 'flex';
   };
 
+  const fmtPct = (v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`;
+
   const renderQuotes = () => {
     if (!state.products.length) {
       elQuotesList.innerHTML = '<div style="color:#64748b;">Loading live prices...</div>';
       return;
     }
-    elQuotesList.innerHTML = state.products
-      .map((p) => {
-        const sym = p.short_name || p.ticker || '?';
-        const price = Number(p.current_price || 0);
-        const chg60 = getChg60s(sym, price);
-        const { refAvg, vsAvgPct, hi, lo } = getAverageStats(p);
 
-        const chg60Col = chg60 > 0.05 ? '#4ade80' : chg60 < -0.05 ? '#f87171' : '#94a3b8';
-        // Highlight stocks trading below their average in bright green (mean-reversion dip opportunity)
+    const enriched = state.products.map((p) => ({ p, m: getPriceMetrics(p) }));
+    if (cfg.sortMode === 'DOWN') {
+      enriched.sort((a, b) => a.m.vsAvgPct - b.m.vsAvgPct);
+    } else if (cfg.sortMode === 'UP') {
+      enriched.sort((a, b) => b.m.vsAvgPct - a.m.vsAvgPct);
+    }
+
+    elQuotesList.innerHTML = enriched
+      .map(({ p, m }) => {
+        const {
+          sym,
+          price,
+          startP,
+          refAvg,
+          vsAvgPct,
+          vsStartPct,
+          hi,
+          lo,
+          offHighPct,
+          offLowPct,
+          rangePos,
+          chg30s,
+          chg1m,
+          chg3m,
+        } = m;
+
+        // Mean-reversion classification:
+        // Down below average (<= -2%) -> DIP (BUY); Up above average (>= +2%) -> PEAK (SHORT / SELL)
         const isDip = vsAvgPct <= -2.0;
-        const isHigh = vsAvgPct >= 2.0;
-        const vsAvgCol = isDip ? '#4ade80' : isHigh ? '#fb923c' : '#94a3b8';
-        const vsAvgBadge = isDip
-          ? `<span style="background:#14532d;color:#4ade80;padding:1px 4px;border-radius:3px;font-weight:700;font-size:10px;">▼ ${vsAvgPct.toFixed(1)}% vs Avg</span>`
-          : isHigh
-          ? `<span style="background:#7c2d12;color:#fdba74;padding:1px 4px;border-radius:3px;font-weight:700;font-size:10px;">▲ +${vsAvgPct.toFixed(1)}% vs Avg</span>`
-          : `<span style="color:${vsAvgCol};font-size:10px;">${vsAvgPct >= 0 ? '+' : ''}${vsAvgPct.toFixed(1)}% vs Avg</span>`;
+        const isPeak = vsAvgPct >= 2.0;
+        const signalBadge = isDip
+          ? `<span style="background:#14532d;color:#4ade80;padding:1px 5px;border-radius:3px;font-weight:700;font-size:10px;">▼ DOWN ${vsAvgPct.toFixed(1)}% (BUY DIP)</span>`
+          : isPeak
+          ? `<span style="background:#7f1d1d;color:#fca5a5;padding:1px 5px;border-radius:3px;font-weight:700;font-size:10px;">▲ UP +${vsAvgPct.toFixed(1)}% (SHORT/SELL)</span>`
+          : `<span style="background:#1e293b;color:#94a3b8;padding:1px 5px;border-radius:3px;font-size:10px;">vs Avg ${fmtPct(vsAvgPct)}</span>`;
+
+        const vsStartCol = vsStartPct > 0.1 ? '#4ade80' : vsStartPct < -0.1 ? '#f87171' : '#94a3b8';
+        const c30 = chg30s > 0.05 ? '#4ade80' : chg30s < -0.05 ? '#f87171' : '#94a3b8';
+        const c1m = chg1m > 0.05 ? '#4ade80' : chg1m < -0.05 ? '#f87171' : '#94a3b8';
+        const c3m = chg3m > 0.05 ? '#4ade80' : chg3m < -0.05 ? '#f87171' : '#94a3b8';
 
         const held = state.holdings[sym];
         const qty = held?.qty || 0;
-        let heldTag = '';
+        let heldLine = '<div style="color:#475569;font-size:10px;">0 sh</div>';
         if (qty !== 0 && held.avgPrice > 0) {
           const pnl = qty > 0
             ? ((price - held.avgPrice) / held.avgPrice) * 100
             : ((held.avgPrice - price) / held.avgPrice) * 100;
           const pnlCol = pnl >= 0 ? '#4ade80' : '#f87171';
-          heldTag = ` <span style="color:#38bdf8;font-weight:700;">(${qty})</span> <span style="color:${pnlCol};font-size:10px;">${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}%</span>`;
+          heldLine = `<div style="font-size:10px;"><span style="color:#38bdf8;font-weight:700;">${qty} sh</span> <span style="color:${pnlCol};font-weight:600;">(${fmtPct(pnl)})</span></div>`;
         }
 
         const pctShares = calcPortfolioPctShares(price);
         const fillBtns = cfg.prefillEnabled
-          ? `<button data-fill-sym="${esc(sym)}" data-fill-id="${esc(p.id)}" data-fill-qty="${pctShares}" style="background:#2563eb;color:#fff;border:none;border-radius:3px;padding:1px 5px;margin-left:4px;cursor:pointer;font-size:10px;font-weight:600;">Fill</button>${
-              qty !== 0
-                ? `<button data-fill-sym="${esc(sym)}" data-fill-id="${esc(p.id)}" data-fill-qty="${Math.abs(qty)}" style="background:#475569;color:#fff;border:none;border-radius:3px;padding:1px 4px;margin-left:3px;cursor:pointer;font-size:10px;">All</button>`
-                : ''
-            }`
+          ? `<div style="display:flex;justify-content:flex-end;gap:3px;margin-top:2px;">
+              <button data-fill-side="BUY" data-fill-sym="${esc(sym)}" data-fill-id="${esc(p.id)}" data-fill-qty="${pctShares}" title="Pre-fill BUY ${pctShares} sh" style="background:#16a34a;color:#fff;border:none;border-radius:3px;padding:1px 6px;cursor:pointer;font-size:10px;font-weight:700;">Buy</button>
+              <button data-fill-side="SELL" data-fill-sym="${esc(sym)}" data-fill-id="${esc(p.id)}" data-fill-qty="${pctShares}" title="Pre-fill SELL/SHORT ${pctShares} sh" style="background:#dc2626;color:#fff;border:none;border-radius:3px;padding:1px 6px;cursor:pointer;font-size:10px;font-weight:700;">Short</button>
+              ${
+                qty !== 0
+                  ? `<button data-fill-side="${qty > 0 ? 'SELL' : 'BUY'}" data-fill-sym="${esc(sym)}" data-fill-id="${esc(p.id)}" data-fill-qty="${Math.abs(qty)}" title="Close full position (${Math.abs(qty)} sh)" style="background:#475569;color:#fff;border:none;border-radius:3px;padding:1px 5px;cursor:pointer;font-size:10px;">Exit</button>`
+                  : ''
+              }
+            </div>`
           : '';
 
-        return `<div style="display:grid;grid-template-columns:1.05fr 1.55fr 0.95fr;align-items:center;padding:5px 2px;border-bottom:1px solid #1e293b;">
-          <div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
-            <b>${esc(sym)}</b>${heldTag}
-            <div style="color:#64748b;font-size:9px;">Avg $${refAvg.toFixed(2)} · Lo $${lo.toFixed(1)} / Hi $${hi.toFixed(1)}</div>
+        // Visual Low-to-High Range Bar
+        const barCol = isDip ? '#4ade80' : isPeak ? '#f87171' : '#38bdf8';
+        const rangeBar = `<div style="width:100%;height:4px;background:#1e293b;border-radius:2px;margin:2px 0;position:relative;overflow:hidden;">
+          <div style="width:${rangePos.toFixed(0)}%;height:100%;background:${barCol};"></div>
+        </div>`;
+
+        return `<div style="display:grid;grid-template-columns:0.85fr 1.15fr 1.15fr 1.05fr;align-items:center;gap:4px;padding:5px 2px;border-bottom:1px solid #1e293b;">
+          <div>
+            <div style="font-weight:700;font-size:12px;">${esc(sym)}</div>
+            ${heldLine}
           </div>
           <div style="text-align:right;font-variant-numeric:tabular-nums;">
-            <b>$${price.toFixed(2)}</b> ${vsAvgBadge}
-            <div style="color:${chg60Col};font-size:10px;">60s: ${chg60 >= 0 ? '+' : ''}${chg60.toFixed(2)}%</div>
+            <div><b style="font-size:12px;">$${price.toFixed(2)}</b> <span style="color:${vsStartCol};font-size:10px;">(${fmtPct(vsStartPct)} start)</span></div>
+            <div style="color:#94a3b8;font-size:10px;">Avg <b>$${refAvg.toFixed(2)}</b> · Start $${startP.toFixed(0)}</div>
+            <div style="font-size:9px;color:#94a3b8;">
+              30s <span style="color:${c30}">${fmtPct(chg30s)}</span> · 1m <span style="color:${c1m}">${fmtPct(chg1m)}</span> · 3m <span style="color:${c3m}">${fmtPct(chg3m)}</span>
+            </div>
           </div>
           <div style="text-align:right;font-variant-numeric:tabular-nums;">
-            <b style="color:#38bdf8;font-size:12px;">${pctShares.toLocaleString()} sh</b>${fillBtns}
+            <div>${signalBadge}</div>
+            ${rangeBar}
+            <div style="font-size:9px;color:#94a3b8;">
+              Lo $${lo.toFixed(1)} (<span style="color:#4ade80">+${offLowPct.toFixed(1)}%</span>) · Hi $${hi.toFixed(1)} (<span style="color:#f87171">${offHighPct.toFixed(1)}%</span>)
+            </div>
+          </div>
+          <div style="text-align:right;font-variant-numeric:tabular-nums;">
+            <div><b style="color:#38bdf8;font-size:12px;">${pctShares.toLocaleString()} sh</b></div>
+            ${fillBtns}
           </div>
         </div>`;
       })
       .join('');
   };
 
-  const renderNews = () => {
-    if (lastRenderedNewsVersion === state.newsVersion) return;
-
-    const prevScrollTop = elNewsList.scrollTop;
-    const prevScrollHeight = elNewsList.scrollHeight;
-
-    elNewsCount.textContent = `${state.newsList.length} items`;
-
-    if (!state.newsList.length) {
-      elNewsList.innerHTML = '<div style="color:#64748b;padding:6px 0;">Waiting for news...</div>';
-    } else {
-      elNewsList.innerHTML = state.newsList
-        .slice(0, 45)
-        .map(
-          (n) => `<div style="background:#1e293b;border-radius:8px;padding:7px 9px;margin-bottom:6px;border-left:3px solid #38bdf8;">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px;">
-              <span style="color:#94a3b8;font-size:10px;">${esc(n.timeLabel)}</span>
-            </div>
-            <div style="color:#f1f5f9;font-size:11px;line-height:1.35;">${esc(n.headline)}</div>
-          </div>`
-        )
-        .join('');
-    }
-
-    if (prevScrollTop > 15) {
-      const delta = elNewsList.scrollHeight - prevScrollHeight;
-      elNewsList.scrollTop = Math.max(0, prevScrollTop + delta);
-    }
-
-    lastRenderedNewsVersion = state.newsVersion;
-  };
-
   const render = () => {
     renderHeader();
     renderQuotes();
-    renderNews();
   };
 
   // --- Controls ---
@@ -415,6 +481,14 @@
     btn.addEventListener('click', () => setAllocPct(btn.getAttribute('data-pct')));
   });
 
+  elSortBtn.addEventListener('click', () => {
+    cfg.sortMode =
+      cfg.sortMode === 'DEFAULT' ? 'DOWN' : cfg.sortMode === 'DOWN' ? 'UP' : 'DEFAULT';
+    saveCfg();
+    renderHeader();
+    renderQuotes();
+  });
+
   elRoundBtn.addEventListener('click', () => {
     cfg.roundMode = !cfg.roundMode;
     saveCfg();
@@ -426,6 +500,7 @@
     const fillBtn = e.target.closest('[data-fill-sym]');
     if (!fillBtn) return;
     prefillTradeForm({
+      side: fillBtn.getAttribute('data-fill-side') || null,
       productId: fillBtn.getAttribute('data-fill-id'),
       ticker: fillBtn.getAttribute('data-fill-sym'),
       qty: Number(fillBtn.getAttribute('data-fill-qty') || 0),
@@ -463,18 +538,16 @@
   window.addEventListener('mousemove', onMouseMove);
   window.addEventListener('mouseup', onMouseUp);
 
-  // --- Live Poller ---
+  // --- Live Poller (Only /financial-products and /portfolio — fast & lightweight) ---
   let isPolling = false;
   const poll = async () => {
     if (isPolling) return;
     isPolling = true;
     try {
       const base = `/resources/simulation/${cfg.simId}`;
-      const [productsRes, portfolioRes, eventsRes, articlesRes] = await Promise.all([
+      const [productsRes, portfolioRes] = await Promise.all([
         fetchJson(`${base}/financial-products`),
         fetchJson(`${base}/player/${cfg.playerId}/portfolio`),
-        fetchJson(`${base}/player/${cfg.playerId}/past-events`),
-        fetchJson(`${base}/articles`).catch(() => null),
       ]);
 
       const products = Array.isArray(productsRes) ? productsRes : productsRes.data || [];
@@ -487,7 +560,7 @@
 
         const arr = state.priceHistory[sym] || [];
         arr.push({ t: now, p: price });
-        state.priceHistory[sym] = arr.filter((x) => now - x.t <= 60000);
+        state.priceHistory[sym] = arr.filter((x) => now - x.t <= 185000); // keep 3m history
 
         const prevSt = state.sessionStats[sym];
         if (!prevSt) {
@@ -524,47 +597,6 @@
           }
         }
         state.holdings = nextHoldings;
-      }
-
-      const rawEvents = Array.isArray(eventsRes) ? eventsRes : eventsRes.events || eventsRes.data || [];
-      for (const ev of rawEvents) {
-        const key = `ev_${ev.id || ev.uuid || ev.in_game_starting_time || JSON.stringify(ev)}`;
-        if (state.seenEvents.has(key)) continue;
-        state.seenEvents.add(key);
-
-        const desc = ev.description;
-        const headline =
-          (typeof desc === 'string' ? desc : desc?.en || desc?.fr) ||
-          (typeof ev.title === 'string' ? ev.title : ev.title?.en || ev.title?.fr) ||
-          ev.content ||
-          ev.text ||
-          key;
-
-        state.newsList.unshift({
-          id: key,
-          timeLabel: ev.date || ev.formatted_date || `t=${ev.in_game_starting_time ?? ''}`,
-          headline,
-        });
-        state.newsVersion++;
-      }
-
-      const rawArticles = Array.isArray(articlesRes) ? articlesRes : articlesRes?.articles || articlesRes?.data || [];
-      for (const art of rawArticles) {
-        const key = `art_${art.id || art.uuid || JSON.stringify(art)}`;
-        if (state.seenEvents.has(key)) continue;
-        state.seenEvents.add(key);
-
-        const title = typeof art.title === 'string' ? art.title : art.title?.en || art.title?.fr || '';
-        const body = typeof art.content === 'string' ? art.content : art.content?.en || art.content?.fr || art.description?.en || art.description?.fr || '';
-        const headline = [title, body].filter(Boolean).join(' — ');
-        if (!headline) continue;
-
-        state.newsList.unshift({
-          id: key,
-          timeLabel: art.date || art.published_at || 'Article',
-          headline,
-        });
-        state.newsVersion++;
       }
 
       state.lastPollAt = new Date().toLocaleTimeString();
