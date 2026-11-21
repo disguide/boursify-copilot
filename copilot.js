@@ -289,7 +289,7 @@
   const root = document.createElement('div');
   root.id = 'boursify-copilot-root';
   const applyWidth = () => {
-    root.style.width = cfg.wideMode ? '650px' : '490px';
+    root.style.width = cfg.wideMode ? '670px' : '510px';
   };
   root.style.cssText = [
     'position:fixed', 'bottom:14px', 'right:14px', 'z-index:999999',
@@ -329,8 +329,8 @@
           <button id="bc-toggle-round" style="background:#2563eb;color:#e2e8f0;border:none;border-radius:4px;padding:2px 7px;cursor:pointer;font-size:10px;">Round: ON</button>
         </div>
       </div>
-      <div style="display:grid;grid-template-columns:0.85fr 1.15fr 1.2fr 1.0fr;font-weight:700;font-size:10px;color:#94a3b8;padding:0 2px;">
-        <span>STOCK / HELD</span>
+      <div style="display:grid;grid-template-columns:1.05fr 1.1fr 1.2fr 0.95fr;font-weight:700;font-size:10px;color:#94a3b8;padding:0 2px;">
+        <span>STOCK · POSITION P&L</span>
         <span style="text-align:right;">PRICE · DRIFT AVG</span>
         <span style="text-align:right;">UP / DOWN vs AVERAGE</span>
         <span id="bc-col-sh-hdr" style="text-align:right;">${cfg.allocPct}% PORT SHARES</span>
@@ -355,19 +355,36 @@
   const elQuotesList = root.querySelector('#bc-quotes-list');
   const elHandle = root.querySelector('#bc-drag-handle');
 
+  const fmtDollarsSigned = (v) => {
+    const rounded = Math.round(Number(v) || 0);
+    return `${rounded >= 0 ? '+$' : '-$'}${Math.abs(rounded).toLocaleString()}`;
+  };
+
   const renderHeader = () => {
     const pct = Number(cfg.allocPct || 20);
     const targetDollars = Math.round(state.totalValue * (pct / 100));
-    const retPct = ((state.totalValue - 1000000) / 1000000) * 100;
-    const retCol = retPct >= 0 ? '#4ade80' : '#f87171';
+    const totalPnlDollars = state.totalValue - 1000000;
+    const retPct = (totalPnlDollars / 1000000) * 100;
+    const retCol = totalPnlDollars >= 0 ? '#4ade80' : '#f87171';
     const mktCol = state.mktAvgDriftPct >= 0 ? '#4ade80' : '#f87171';
 
+    let openPnlDollars = 0;
+    let openPositionsCount = 0;
+    for (const p of state.products) {
+      const sym = p.short_name || p.ticker;
+      const price = Number(p.current_price || 0);
+      const h = sym ? state.holdings[sym] : null;
+      if (h && h.qty !== 0 && h.avgPrice > 0) {
+        openPositionsCount += 1;
+        openPnlDollars += h.qty > 0
+          ? (price - h.avgPrice) * h.qty
+          : (h.avgPrice - price) * Math.abs(h.qty);
+      }
+    }
+    const openCol = openPnlDollars >= 0 ? '#4ade80' : '#f87171';
+
     elStatus.textContent = state.statusMsg ? `(${state.statusMsg})` : '';
-    elCash.innerHTML = `Total: <b>$${Math.round(state.totalValue).toLocaleString()}</b> <span style="color:${retCol}">(${retPct >= 0 ? '+' : ''}${retPct.toFixed(2)}%)</span> · Cash: <b>$${Math.round(state.cash).toLocaleString()}</b> · Mkt Drift: <b style="color:${mktCol}">${state.mktAvgDriftPct >= 0 ? '+' : ''}${state.mktAvgDriftPct.toFixed(1)}%</b> · ${
-      state.lastError
-        ? `<span style="color:#f87171">${esc(state.lastError)}</span>`
-        : esc(state.lastPollAt || '...')
-    }`;
+    elCash.innerHTML = `Total: <b>$${Math.round(state.totalValue).toLocaleString()}</b> <span style="color:${retCol};font-weight:700;">(${fmtDollarsSigned(totalPnlDollars)} / ${retPct >= 0 ? '+' : ''}${retPct.toFixed(2)}%)</span> · Open P&L (${openPositionsCount}): <b style="color:${openCol}">${fmtDollarsSigned(openPnlDollars)}</b> · Cash: <b>$${Math.round(state.cash).toLocaleString()}</b> · Mkt: <b style="color:${mktCol}">${state.mktAvgDriftPct >= 0 ? '+' : ''}${state.mktAvgDriftPct.toFixed(1)}%</b>`;
     elBudgetPill.textContent = `= $${targetDollars.toLocaleString()}`;
     elColShHdr.textContent = `${pct}% PORT SHARES`;
     elAvgModeBtn.textContent =
@@ -459,11 +476,27 @@
         const qty = held?.qty || 0;
         let heldLine = '<div style="color:#475569;font-size:10px;">0 sh</div>';
         if (qty !== 0 && held.avgPrice > 0) {
-          const pnl = qty > 0
-            ? ((price - held.avgPrice) / held.avgPrice) * 100
-            : ((held.avgPrice - price) / held.avgPrice) * 100;
-          const pnlCol = pnl >= 0 ? '#4ade80' : '#f87171';
-          heldLine = `<div style="font-size:10px;"><span style="color:#38bdf8;font-weight:700;">${qty} sh</span> <span style="color:${pnlCol};font-weight:600;">(${fmtPct(pnl)})</span></div>`;
+          const pnlDollars =
+            qty > 0
+              ? (price - held.avgPrice) * qty
+              : (held.avgPrice - price) * Math.abs(qty);
+          const pnlPct =
+            qty > 0
+              ? ((price - held.avgPrice) / held.avgPrice) * 100
+              : ((held.avgPrice - price) / held.avgPrice) * 100;
+          const pnlCol = pnlDollars >= 0 ? '#4ade80' : '#f87171';
+          const pnlBg = pnlDollars >= 0 ? '#052e16' : '#450a0a';
+          const sideTag = qty > 0 ? 'LONG' : 'SHORT';
+          heldLine = `
+            <div style="font-size:10px;color:#cbd5e1;">
+              <span style="color:#38bdf8;font-weight:700;">${qty.toLocaleString()} sh</span>
+              <span style="color:#94a3b8;font-size:9px;">(${sideTag} @$${held.avgPrice.toFixed(2)})</span>
+            </div>
+            <div style="margin-top:1px;">
+              <span style="background:${pnlBg};color:${pnlCol};padding:1px 4px;border-radius:3px;font-weight:700;font-size:10px;">
+                ${fmtDollarsSigned(pnlDollars)} (${fmtPct(pnlPct)})
+              </span>
+            </div>`;
         }
 
         const pctShares = calcPortfolioPctShares(price);
@@ -485,7 +518,7 @@
           <div style="width:${rangePos.toFixed(0)}%;height:100%;background:${barCol};"></div>
         </div>`;
 
-        return `<div style="display:grid;grid-template-columns:0.85fr 1.15fr 1.2fr 1.0fr;align-items:center;gap:4px;padding:5px 2px;border-bottom:1px solid #1e293b;">
+        return `<div style="display:grid;grid-template-columns:1.05fr 1.1fr 1.2fr 0.95fr;align-items:center;gap:4px;padding:5px 2px;border-bottom:1px solid #1e293b;">
           <div>
             <div style="font-weight:700;font-size:12px;">${esc(sym)}</div>
             ${heldLine}
@@ -678,8 +711,27 @@
             const fp = it.financial_product || state.products.find((p) => p.id === it.financial_product_id);
             const sym = it.short_name || it.ticker || fp?.short_name || fp?.ticker;
             const q = Number(it.quantity ?? it.pivot?.quantity ?? 0);
-            const avg = Number(it.average_price ?? it.avg_price ?? it.unit_price ?? fp?.current_price ?? 0);
-            if (sym && q !== 0) nextHoldings[sym] = { qty: q, avgPrice: avg };
+            const avg = Number(
+              it.average_price ??
+                it.avg_price ??
+                it.purchase_price ??
+                it.unit_price ??
+                it.pivot?.average_price ??
+                it.pivot?.unit_price ??
+                fp?.current_price ??
+                0
+            );
+            if (sym && q !== 0) {
+              const prevHeld = state.holdings[sym];
+              // Preserve or update entry price
+              const finalAvg =
+                avg > 0
+                  ? avg
+                  : prevHeld && prevHeld.qty === q && prevHeld.avgPrice > 0
+                  ? prevHeld.avgPrice
+                  : Number(fp?.current_price || 0);
+              nextHoldings[sym] = { qty: q, avgPrice: finalAvg };
+            }
           }
         }
         state.holdings = nextHoldings;
