@@ -18,12 +18,12 @@
     window.__BOURSIFY_COPILOT__.destroy();
   }
 
-  const STORAGE_KEY = 'boursify_copilot_cfg_v8';
+  const STORAGE_KEY = 'boursify_copilot_cfg_v9';
   const defaultCfg = {
-    simId: '448',
-    playerId: '38158',
+    simId: '451',
+    playerId: '38332',
     playerName: '',
-    idConfirmed: false,
+    idConfirmed: true,
     pollMs: 2000,
     prefillEnabled: false,
     allocPct: 20,        // 20% of TOTAL PORTFOLIO VALUE
@@ -40,10 +40,10 @@
     cfg = {
       ...defaultCfg,
       ...saved,
-      // Never load stale simId/playerId from localStorage before checking the live page!
-      simId: defaultCfg.simId,
-      playerId: defaultCfg.playerId,
-      idConfirmed: false,
+      // Always start with live simId 451 / playerId 38332 unless detectIds() finds a newer native XHR
+      simId: '451',
+      playerId: '38332',
+      idConfirmed: true,
     };
   } catch (_) {}
 
@@ -95,13 +95,6 @@
           if (m) {
             return applyDetectedIds(m[1], m[2]);
           }
-        }
-      }
-      // Also check oldest performance entry of any type (index 0 -> N) that has /resources/simulation/X/player/Y
-      for (let i = 0; i < entries.length; i++) {
-        const m = entries[i].name.match(/\/resources\/simulation\/(\d+)\/player\/(\d+)/);
-        if (m && (m[1] !== '448' || m[2] !== '38158')) {
-          return applyDetectedIds(m[1], m[2]);
         }
       }
 
@@ -1197,25 +1190,9 @@
             totalValue: Number(pl.total_value ?? 1000000),
           }));
 
-          // Match current cfg.playerId to set playerName
+          // Match current cfg.playerId to set playerName (never override your personal playerId 38332 unless you click the badge)
           const curMatch = state.teamPlayers.find((tp) => tp.id === String(cfg.playerId));
           if (curMatch) cfg.playerName = curMatch.name;
-
-          // If current playerId has untouched $1M cash & $1M totalValue, check if another teammate account is the one actively trading!
-          if (!cfg.idConfirmed) {
-            const activeTrader = state.teamPlayers.find(
-              (tp) => Math.abs(tp.cash - 1000000) > 1 || Math.abs(tp.totalValue - 1000000) > 1
-            );
-            if (activeTrader && activeTrader.id !== String(cfg.playerId)) {
-              cfg.playerId = activeTrader.id;
-              cfg.playerName = activeTrader.name;
-              saveCfg();
-            } else if (!curMatch && state.teamPlayers[0]) {
-              cfg.playerId = state.teamPlayers[0].id;
-              cfg.playerName = state.teamPlayers[0].name;
-              saveCfg();
-            }
-          }
         }
       }
 
