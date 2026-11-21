@@ -172,6 +172,7 @@
     holdings: {},          // { sym: { qty, avgPrice, pnlDollars, pnlPct, totalAmount } }
     txCostMap: {},         // { sym: { qty, avgPrice } } reconstructed from /transactions
     teamPlayers: [],       // [{ id, name, cash, totalValue }] from /players
+    teamTotalPnl: 0,       // combined P&L across all 3 team accounts
     pollTick: 0,
     lastPollAt: null,
     lastError: null,
@@ -353,27 +354,36 @@
           0
       );
       const amt = Number(tx.amount ?? tx.total ?? tx.total_amount ?? tx.value ?? tx.cost ?? 0);
-      const unitP = Number(
+      let unitP = Number(
         tx.unit_price ??
           tx.price ??
           tx.execution_price ??
           tx.share_price ??
           tx.average_price ??
-          (rawQ !== 0 && amt !== 0 ? Math.abs(amt) / Math.abs(rawQ) : 0)
+          0
       );
+      if (unitP <= 0 && rawQ !== 0 && amt !== 0) {
+        unitP = Math.abs(amt) / Math.abs(rawQ);
+      }
+      if (rawQ === 0 && unitP > 0 && amt !== 0) {
+        rawQ = Math.round(amt / unitP);
+      }
       if (!rawQ || unitP <= 0) continue;
 
       const typeStr = String(
         tx.type ?? tx.side ?? tx.action ?? tx.transaction_type ?? tx.order_type ?? ''
       ).toLowerCase();
       let signedQ = rawQ;
-      if (
+      // NOTE: In Boursify, rawQ is already negative for Sell/Short transactions, or typeStr indicates sell/buy.
+      // Never negate rawQ merely because amt < 0 (since cash outflow on a BUY can have negative amount!).
+      if (rawQ < 0) {
+        signedQ = rawQ;
+      } else if (
         typeStr.includes('sell') ||
         typeStr.includes('vente') ||
         typeStr.includes('vendre') ||
         typeStr.includes('short') ||
-        typeStr === 's' ||
-        (typeStr === '' && amt < 0 && rawQ > 0)
+        typeStr === 's'
       ) {
         signedQ = -Math.abs(rawQ);
       } else if (
@@ -684,22 +694,67 @@
     return `${rounded >= 0 ? '+$' : '-$'}${Math.abs(rounded).toLocaleString()}`;
   };
 
+  // Read exact cash & portfolio value from Boursify's native page DOM (or Vue state) so Personal Win/Loss is 100% accurate
+  const readNativePortfolioTotals = () => {
+    try {
+      // 1. Check Vue root / components for portfolio summary
+      const appEl = document.querySelector('#app') || document.body;
+      const vueRoot = appEl?.__vue__ || appEl?._vnode?.context;
+      if (vueRoot) {
+        const walk = (vm, depth = 0) => {
+          if (!vm || depth > 6) return null;
+          const sum = vm.portfolio?.summary || vm.summary;
+          if (sum && sum.total_value !== undefined) {
+            return {
+              totalValue: Number(sum.total_value),
+              cash: Number(sum.cash_balance ?? state.cash),
+              positions: vm.portfolio?.positions || vm.positions || null,
+            };
+          }
+          for (const ch of vm.$children || []) {
+            const found = walk(ch, depth + 1);
+            if (found) return found;
+          }
+          return null;
+        };
+        const vData = walk(vueRoot);
+        if (vData && vData.totalValue > 0) return vData;
+      }
+
+      // 2. Check visible text on /player/trade or /player/portfolio ("Cash balance 1000000$" / "Portfolio value 1000000$")
+      const bodyText = document.body?.innerText || '';
+      const pvMatch = bodyText.match(/(?:Portfolio value|Valeur du portefeuille)\s*[:\n\t]*\s*([0-9,\s]+(?:\.\d+)?)\s*\$/i) ||
+                      bodyText.match(/\$\s*([0-9,]+(?:\.\d+)?)\s*(?:Portfolio value|Valeur du portefeuille)/i);
+      const cbMatch = bodyText.match(/(?:Cash balance|Encaisse|Solde en espèces)\s*[:\n\t]*\s*([0-9,\s]+(?:\.\d+)?)\s*\$/i);
+      if (pvMatch) {
+        const pv = Number(pvMatch[1].replace(/[,\s]/g, ''));
+        const cb = cbMatch ? Number(cbMatch[1].replace(/[,\s]/g, '')) : null;
+        if (pv > 0) {
+          return { totalValue: pv, cash: cb !== null && cb >= 0 ? cb : state.cash, positions: null };
+        }
+      }
+    } catch (_) {}
+    return null;
+  };
+
   const renderHeader = () => {
     const pct = Number(cfg.allocPct || 20);
     const targetDollars = Math.round(state.totalValue * (pct / 100));
-    const totalPnlDollars = state.totalValue - 1000000;
-    const retPct = (totalPnlDollars / 1000000) * 100;
-    const retCol = totalPnlDollars >= 0 ? '#4ade80' : '#f87171';
-    const mktCol = state.mktAvgDriftPct >= 0 ? '#4ade80' : '#f87171';
 
+    // Calculate live holdings market value & open P&L across all held stocks
     let openPnlDollars = 0;
     let openPositionsCount = 0;
+    let longMarketVal = 0;
+    let shortLiabVal = 0;
     for (const p of state.products) {
       const sym = p.short_name || p.ticker;
       const price = Number(p.current_price || 0);
       const h = sym ? state.holdings[sym] : null;
       if (h && h.qty !== 0) {
         openPositionsCount += 1;
+        if (h.qty > 0) longMarketVal += h.qty * price;
+        else shortLiabVal += Math.abs(h.qty) * price;
+
         if (h.pnlDollars !== undefined && h.pnlDollars !== null) {
           openPnlDollars += h.pnlDollars;
         } else if (h.avgPrice > 0) {
@@ -709,13 +764,39 @@
         }
       }
     }
-    const openCol = openPnlDollars >= 0 ? '#4ade80' : '#f87171';
+
+    // Personal Portfolio Win / Loss ($ and %) vs $1,000,000 starting capital
+    // If Boursify's summary.total_value hasn't updated between ticks, compute live equity from cash + live positions!
+    let personalTotalValue = state.totalValue;
+    if (
+      openPositionsCount > 0 &&
+      Math.abs(personalTotalValue - 1000000) < 1 &&
+      Math.abs(openPnlDollars) > 1
+    ) {
+      personalTotalValue = 1000000 + openPnlDollars;
+    }
+
+    const personalWinLossDollars = personalTotalValue - 1000000;
+    const personalWinLossPct = (personalWinLossDollars / 1000000) * 100;
+    const wlCol =
+      personalWinLossDollars > 0 ? '#4ade80' : personalWinLossDollars < 0 ? '#f87171' : '#e2e8f0';
+    const wlBg =
+      personalWinLossDollars > 0 ? '#14532d' : personalWinLossDollars < 0 ? '#7f1d1d' : '#334155';
+    const wlLabel = personalWinLossDollars >= 0 ? 'WIN' : 'LOSS';
+    const openCol = openPnlDollars > 0 ? '#4ade80' : openPnlDollars < 0 ? '#f87171' : '#e2e8f0';
 
     elStatus.textContent = state.statusMsg ? `(${state.statusMsg})` : '';
     elPlayerBadge.textContent = cfg.playerName
       ? `[${cfg.playerName} #${cfg.playerId}]`
       : `[Player #${cfg.playerId}]`;
-    elCash.innerHTML = `Total: <b>$${Math.round(state.totalValue).toLocaleString()}</b> <span style="color:${retCol};font-weight:700;">(${fmtDollarsSigned(totalPnlDollars)} / ${retPct >= 0 ? '+' : ''}${retPct.toFixed(1)}%)</span> · Open P&L: <b style="color:${openCol}">${fmtDollarsSigned(openPnlDollars)}</b> · Cash: <b>$${Math.round(state.cash).toLocaleString()}</b>`;
+    elCash.innerHTML = `
+      <span style="background:${wlBg};color:${wlCol};padding:1px 6px;border-radius:4px;font-weight:700;font-size:11px;">
+        MY P&L (${wlLabel}): ${fmtDollarsSigned(personalWinLossDollars)} (${personalWinLossPct >= 0 ? '+' : ''}${personalWinLossPct.toFixed(2)}%)
+      </span>
+      · Portfolio: <b style="color:#f8fafc;">$${Math.round(personalTotalValue).toLocaleString()}</b>
+      · Open Trades: <b style="color:${openCol};">${fmtDollarsSigned(openPnlDollars)}</b>
+      · Cash: <b>$${Math.round(state.cash).toLocaleString()}</b>
+    `;
     elBudgetPill.textContent = `= $${targetDollars.toLocaleString()}`;
     elColShHdr.textContent = `${pct}% SHARES`;
     elAvgModeBtn.textContent =
@@ -1063,10 +1144,43 @@
       state.mktAvgDriftPct = computeMarketDriftPct();
 
       if (portfolioRes) {
-        const cashVal = portfolioRes.summary?.cash_balance ?? portfolioRes.current_cash;
-        if (cashVal !== undefined) state.cash = Number(cashVal);
-        const totalVal = portfolioRes.summary?.total_value ?? portfolioRes.total_value;
-        if (totalVal !== undefined) state.totalValue = Number(totalVal);
+        const cashVal =
+          portfolioRes.summary?.cash_balance ??
+          portfolioRes.current_cash ??
+          portfolioRes.cash_balance ??
+          portfolioRes.data?.summary?.cash_balance;
+        if (cashVal !== undefined && cashVal !== null) state.cash = Number(cashVal);
+
+        const totalVal =
+          portfolioRes.summary?.total_value ??
+          portfolioRes.total_value ??
+          portfolioRes.portfolio_value ??
+          portfolioRes.data?.summary?.total_value;
+        if (totalVal !== undefined && totalVal !== null) state.totalValue = Number(totalVal);
+
+        // Also cross-check with /players entry for this playerId and native DOM/Vue state
+        const teamEntry = state.teamPlayers.find((tp) => tp.id === String(cfg.playerId));
+        if (
+          teamEntry &&
+          Math.abs(state.totalValue - 1000000) < 1 &&
+          Math.abs(teamEntry.totalValue - 1000000) > 1
+        ) {
+          state.totalValue = teamEntry.totalValue;
+          state.cash = teamEntry.cash;
+        }
+        const nativeTotals = readNativePortfolioTotals();
+        if (
+          nativeTotals &&
+          nativeTotals.totalValue > 0 &&
+          (Math.abs(state.totalValue - 1000000) < 1 || Math.abs(nativeTotals.totalValue - 1000000) > 1)
+        ) {
+          if (Math.abs(nativeTotals.totalValue - 1000000) > 1) {
+            state.totalValue = nativeTotals.totalValue;
+          }
+          if (nativeTotals.cash !== undefined && Math.abs(nativeTotals.cash - 1000000) > 1) {
+            state.cash = nativeTotals.cash;
+          }
+        }
 
         const rawPositions =
           portfolioRes.positions ??
