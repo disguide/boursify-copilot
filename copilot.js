@@ -18,7 +18,7 @@
     window.__BOURSIFY_COPILOT__.destroy();
   }
 
-  const STORAGE_KEY = 'boursify_copilot_cfg_v7';
+  const STORAGE_KEY = 'boursify_copilot_cfg_v8';
   const defaultCfg = {
     simId: '448',
     playerId: '38158',
@@ -37,7 +37,14 @@
   let cfg = { ...defaultCfg };
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
-    cfg = { ...defaultCfg, ...saved, idConfirmed: false };
+    cfg = {
+      ...defaultCfg,
+      ...saved,
+      // Never load stale simId/playerId from localStorage before checking the live page!
+      simId: defaultCfg.simId,
+      playerId: defaultCfg.playerId,
+      idConfirmed: false,
+    };
   } catch (_) {}
 
   const saveCfg = () => {
@@ -46,76 +53,102 @@
     } catch (_) {}
   };
 
+  const applyDetectedIds = (sId, pId) => {
+    let changed = false;
+    if (sId && String(sId) !== String(cfg.simId)) {
+      cfg.simId = String(sId);
+      changed = true;
+    }
+    if (pId && String(pId) !== String(cfg.playerId)) {
+      cfg.playerId = String(pId);
+      changed = true;
+    }
+    if (sId && pId) {
+      cfg.idConfirmed = true;
+    }
+    if (changed) {
+      saveCfg();
+    }
+    return Boolean(sId && pId);
+  };
+
   const detectIds = () => {
     try {
-      // 1. Only inspect XHR / fetch resources that do NOT come from our own copilot script
-      // Specifically look for Boursify's native Print link or Vue component props in the DOM first!
-      const printLink = document.querySelector('a[href*="/resources/simulation/"][href*="/player/"]');
-      if (printLink) {
-        const m = printLink.getAttribute('href').match(/\/resources\/simulation\/(\d+)\/player\/(\d+)/);
+      // 1. Check Boursify's native Print link on /player/trade or /player/portfolio
+      const printLinks = Array.from(
+        document.querySelectorAll('a[href*="/resources/simulation/"]')
+      );
+      for (const link of printLinks) {
+        const href = link.getAttribute('href') || '';
+        const m = href.match(/\/resources\/simulation\/(\d+)\/player\/(\d+)/);
         if (m) {
-          cfg.simId = m[1];
-          cfg.playerId = m[2];
-          cfg.idConfirmed = true;
-          saveCfg();
-          return true;
+          return applyDetectedIds(m[1], m[2]);
         }
       }
 
-      // 2. Inspect Vue root / component instances for player.id and simulation.id
-      const appEl = document.querySelector('#app') || document.body;
-      const vueRoot = appEl?.__vue__ || appEl?._vnode?.context;
-      if (vueRoot) {
-        const walkVue = (vm, depth = 0) => {
-          if (!vm || depth > 5) return false;
-          const pId =
-            vm.player?.id ??
-            vm.currentPlayer?.id ??
-            vm.$store?.state?.player?.id ??
-            vm.$root?.player?.id;
-          const sId =
-            vm.simulation?.id ??
-            vm.player?.simulation_id ??
-            vm.$store?.state?.simulation?.id ??
-            vm.$root?.simulation?.id;
-          if (pId) {
-            cfg.playerId = String(pId);
-            if (sId) cfg.simId = String(sId);
-            cfg.idConfirmed = true;
-            saveCfg();
-            return true;
+      // 2. Scan all performance network entries in chronological order (OLDEST FIRST -> Boursify's native XHRs at page load!)
+      // Check initiatorType === 'xmlhttprequest' first (Boursify uses Axios XHR; our copilot uses fetch!)
+      const entries = performance.getEntriesByType('resource') || [];
+      for (let i = 0; i < entries.length; i++) {
+        if (entries[i].initiatorType === 'xmlhttprequest') {
+          const m = entries[i].name.match(/\/resources\/simulation\/(\d+)\/player\/(\d+)/);
+          if (m) {
+            return applyDetectedIds(m[1], m[2]);
           }
-          const children = vm.$children || [];
-          for (const ch of children) {
-            if (walkVue(ch, depth + 1)) return true;
-          }
-          return false;
-        };
-        if (walkVue(vueRoot)) return true;
+        }
+      }
+      // Also check oldest performance entry of any type (index 0 -> N) that has /resources/simulation/X/player/Y
+      for (let i = 0; i < entries.length; i++) {
+        const m = entries[i].name.match(/\/resources\/simulation\/(\d+)\/player\/(\d+)/);
+        if (m && (m[1] !== '448' || m[2] !== '38158')) {
+          return applyDetectedIds(m[1], m[2]);
+        }
       }
 
-      // 3. Inspect inline scripts / HTML for player ID or simulation ID
+      // 3. Deep scan ALL DOM elements for Vue 2 (__vue__) or Vue 3 (__vueParentComponent) instances
+      const allEls = document.querySelectorAll('#app, #app *');
+      for (let i = 0; i < Math.min(allEls.length, 300); i++) {
+        const el = allEls[i];
+        const vm = el.__vue__ || el._vnode?.context || el.__vueParentComponent?.ctx;
+        if (!vm) continue;
+        const pId =
+          vm.player?.id ??
+          vm.currentPlayer?.id ??
+          vm.$data?.player?.id ??
+          vm.$props?.player?.id ??
+          vm.$store?.state?.player?.id ??
+          vm.$root?.player?.id;
+        const sId =
+          vm.simulation?.id ??
+          vm.player?.simulation_id ??
+          vm.$data?.simulation?.id ??
+          vm.$props?.simulation?.id ??
+          vm.$store?.state?.simulation?.id ??
+          vm.$root?.simulation?.id;
+        if (pId || sId) {
+          if (applyDetectedIds(sId || cfg.simId, pId || cfg.playerId)) return true;
+        }
+      }
+
+      // 4. Inspect inline scripts / HTML for /resources/simulation/X/player/Y or JSON props
       const html = document.documentElement?.innerHTML || '';
       const pm = html.match(/\/resources\/simulation\/(\d+)\/player\/(\d+)/);
       if (pm) {
-        cfg.simId = pm[1];
-        cfg.playerId = pm[2];
-        cfg.idConfirmed = true;
-        saveCfg();
-        return true;
+        return applyDetectedIds(pm[1], pm[2]);
+      }
+      const simAttr = html.match(/simulation[_-]id["'\s:=]+(\d+)/i);
+      const pidAttr = html.match(/player[_-]id["'\s:=]+(\d+)/i);
+      if (simAttr || pidAttr) {
+        return applyDetectedIds(simAttr ? simAttr[1] : cfg.simId, pidAttr ? pidAttr[1] : cfg.playerId);
       }
 
-      // 4. Inspect performance entries ONLY BEFORE our first poll runs (so we don't match our own fetch!)
-      if (!window.__BC_POLL_STARTED__) {
-        const entries = performance.getEntriesByType('resource') || [];
-        for (let i = entries.length - 1; i >= 0; i--) {
-          const m = entries[i].name.match(/\/resources\/simulation\/(\d+)\/player\/(\d+)/);
-          if (m) {
-            cfg.simId = m[1];
-            cfg.playerId = m[2];
-            cfg.idConfirmed = true;
+      // 5. Check if any simulation ID (even without /player/) appears in XHR performance entries
+      for (let i = 0; i < entries.length; i++) {
+        if (entries[i].initiatorType === 'xmlhttprequest') {
+          const sm = entries[i].name.match(/\/resources\/simulation\/(\d+)/);
+          if (sm && sm[1] !== String(cfg.simId)) {
+            cfg.simId = sm[1];
             saveCfg();
-            return true;
           }
         }
       }
@@ -317,14 +350,16 @@
     return domPos;
   };
 
-  // Reconstruct exact average purchase/short entry price per stock from transaction history
-  const computeCostBasisFromTransactions = (txRes) => {
+  // Reconstruct exact average purchase/short entry price per stock from transaction history.
+  // Accepts actualQuantitiesBySym ({ RAI: 4000, PAL: -2000 }) from /portfolio so it can solve for
+  // the exact entry price even when /transactions uses positive quantities with no buy/sell field!
+  const computeCostBasisFromTransactions = (txRes, actualQuantitiesBySym = {}) => {
     const list = Array.isArray(txRes)
       ? txRes
       : txRes?.transactions || txRes?.data?.transactions || txRes?.data || [];
     if (!Array.isArray(list) || !list.length) return;
 
-    // Check chronological order: if the first item has a larger ID than the last item, reverse it (newest-first -> oldest-first)
+    // Group transactions by symbol in chronological order (oldest -> newest)
     const sorted = [...list];
     if (sorted.length > 1) {
       const firstId = Number(sorted[0]?.id ?? sorted[0]?.transaction_id ?? 0);
@@ -338,7 +373,7 @@
       }
     }
 
-    const map = {}; // { sym: { qty: 0, avgPrice: 0 } }
+    const bySym = {};
     for (const tx of sorted) {
       if (!tx || typeof tx !== 'object') continue;
       const sym = resolveSymbol(tx);
@@ -373,11 +408,10 @@
       const typeStr = String(
         tx.type ?? tx.side ?? tx.action ?? tx.transaction_type ?? tx.order_type ?? ''
       ).toLowerCase();
-      let signedQ = rawQ;
-      // NOTE: In Boursify, rawQ is already negative for Sell/Short transactions, or typeStr indicates sell/buy.
-      // Never negate rawQ merely because amt < 0 (since cash outflow on a BUY can have negative amount!).
+
+      let explicitSign = 0;
       if (rawQ < 0) {
-        signedQ = rawQ;
+        explicitSign = -1;
       } else if (
         typeStr.includes('sell') ||
         typeStr.includes('vente') ||
@@ -385,38 +419,99 @@
         typeStr.includes('short') ||
         typeStr === 's'
       ) {
-        signedQ = -Math.abs(rawQ);
+        explicitSign = -1;
       } else if (
         typeStr.includes('buy') ||
         typeStr.includes('achat') ||
         typeStr.includes('acheter') ||
         typeStr === 'b'
       ) {
-        signedQ = Math.abs(rawQ);
+        explicitSign = 1;
       }
 
-      const cur = map[sym] || { qty: 0, avgPrice: 0 };
-      const prevQty = cur.qty;
-      const nextQty = prevQty + signedQ;
-
-      if (nextQty === 0) {
-        cur.qty = 0;
-        cur.avgPrice = 0;
-      } else if (prevQty === 0 || (prevQty > 0 && signedQ > 0) || (prevQty < 0 && signedQ < 0)) {
-        // Opening or adding to the same side -> weighted average entry price
-        const totalCost = Math.abs(prevQty) * cur.avgPrice + Math.abs(signedQ) * unitP;
-        cur.avgPrice = totalCost / Math.abs(nextQty);
-        cur.qty = nextQty;
-      } else if ((prevQty > 0 && nextQty > 0) || (prevQty < 0 && nextQty < 0)) {
-        // Partial close -> entry price stays the same
-        cur.qty = nextQty;
-      } else {
-        // Flipped from long to short or short to long -> new side gets current unitP
-        cur.qty = nextQty;
-        cur.avgPrice = unitP;
-      }
-      map[sym] = cur;
+      if (!bySym[sym]) bySym[sym] = [];
+      bySym[sym].push({ absQ: Math.abs(rawQ), unitP, amt, explicitSign });
     }
+
+    const runChronoAvg = (txList, signs) => {
+      let curQty = 0;
+      let curAvg = 0;
+      for (let i = 0; i < txList.length; i++) {
+        const { absQ, unitP } = txList[i];
+        const signedQ = signs[i] * absQ;
+        const nextQty = curQty + signedQ;
+        if (nextQty === 0) {
+          curQty = 0;
+          curAvg = 0;
+        } else if (curQty === 0 || (curQty > 0 && signedQ > 0) || (curQty < 0 && signedQ < 0)) {
+          const totalCost = Math.abs(curQty) * curAvg + Math.abs(signedQ) * unitP;
+          curAvg = totalCost / Math.abs(nextQty);
+          curQty = nextQty;
+        } else if ((curQty > 0 && nextQty > 0) || (curQty < 0 && nextQty < 0)) {
+          curQty = nextQty;
+        } else {
+          curQty = nextQty;
+          curAvg = unitP;
+        }
+      }
+      return { qty: curQty, avgPrice: curAvg };
+    };
+
+    const map = {};
+    for (const [sym, txList] of Object.entries(bySym)) {
+      const targetQ = actualQuantitiesBySym[sym];
+
+      // 1. First try explicit signs (defaulting unknown to +1 if targetQ >= 0, or -1 if targetQ < 0)
+      const defaultSign = targetQ !== undefined && targetQ < 0 ? -1 : 1;
+      const baseSigns = txList.map((t) => (t.explicitSign !== 0 ? t.explicitSign : defaultSign));
+      let res = runChronoAvg(txList, baseSigns);
+
+      // 2. If targetQ from /portfolio is known and baseSigns doesn't sum to targetQ, solve for the exact sign assignment!
+      if (targetQ !== undefined && res.qty !== targetQ) {
+        let solved = false;
+        // Check from most recent transactions backwards if a suffix sums to targetQ
+        let suffixQ = 0;
+        let suffixCost = 0;
+        const tSign = targetQ >= 0 ? 1 : -1;
+        for (let i = txList.length - 1; i >= 0; i--) {
+          suffixQ += tSign * txList[i].absQ;
+          suffixCost += txList[i].absQ * txList[i].unitP;
+          if (suffixQ === targetQ) {
+            res = { qty: targetQ, avgPrice: suffixCost / Math.abs(targetQ) };
+            solved = true;
+            break;
+          }
+        }
+
+        // If not a simple recent suffix and txList has <= 12 trades for this stock, find latest valid sign combination matching targetQ
+        if (!solved && txList.length <= 12) {
+          const n = txList.length;
+          const totalCombos = 1 << n;
+          for (let mask = totalCombos - 1; mask >= 0; mask--) {
+            let sum = 0;
+            const candidateSigns = new Array(n);
+            for (let b = 0; b < n; b++) {
+              const s = (mask & (1 << b)) ? 1 : -1;
+              candidateSigns[b] = s;
+              sum += s * txList[b].absQ;
+            }
+            if (sum === targetQ) {
+              res = runChronoAvg(txList, candidateSigns);
+              solved = true;
+              break;
+            }
+          }
+        }
+
+        // Fallback if still unsolved: use the most recent transaction's unitP for this symbol
+        if (!solved && txList.length > 0) {
+          res = { qty: targetQ, avgPrice: txList[txList.length - 1].unitP };
+        }
+      }
+
+      map[sym] = res;
+    }
+
     state.txCostMap = map;
   };
 
@@ -636,7 +731,7 @@
   root.innerHTML = `
     <div id="bc-drag-handle" style="display:flex;justify-content:space-between;align-items:center;padding:9px 12px;background:#1e293b;border-bottom:1px solid #334155;cursor:move;user-select:none;">
       <div style="min-width:0;padding-right:8px;">
-        <div style="font-weight:700;font-size:13px;">Boursify 20% Portfolio Sizer & Price Radar <span style="color:#38bdf8">#${esc(cfg.simId)}</span> <span id="bc-player-badge" style="font-size:10px;color:#fbbf24;cursor:pointer;text-decoration:underline;" title="Click to switch active team player account"></span> <span id="bc-status-msg" style="font-size:10px;color:#4ade80;"></span></div>
+        <div style="font-weight:700;font-size:13px;">Boursify 20% Portfolio Sizer & Price Radar <span id="bc-sim-badge" style="color:#38bdf8">#${esc(cfg.simId)}</span> <span id="bc-player-badge" style="font-size:10px;color:#fbbf24;cursor:pointer;text-decoration:underline;" title="Click to switch active team player account"></span> <span id="bc-status-msg" style="font-size:10px;color:#4ade80;"></span></div>
         <div id="bc-cash-line" style="color:#94a3b8;font-size:10px;">Total: $1,000,000 · Cash: $1,000,000</div>
       </div>
       <div style="display:flex;gap:5px;align-items:center;flex-shrink:0;">
@@ -674,6 +769,7 @@
   document.body.appendChild(root);
 
   const elStatus = root.querySelector('#bc-status-msg');
+  const elSimBadge = root.querySelector('#bc-sim-badge');
   const elPlayerBadge = root.querySelector('#bc-player-badge');
   const elCash = root.querySelector('#bc-cash-line');
   const elWideBtn = root.querySelector('#bc-toggle-wide');
@@ -694,34 +790,54 @@
     return `${rounded >= 0 ? '+$' : '-$'}${Math.abs(rounded).toLocaleString()}`;
   };
 
-  // Read exact cash & portfolio value from Boursify's native page DOM (or Vue state) so Personal Win/Loss is 100% accurate
+  // Read exact cash, portfolio value, positions, and transactions directly from Boursify's live Vue component state or DOM!
   const readNativePortfolioTotals = () => {
     try {
-      // 1. Check Vue root / components for portfolio summary
-      const appEl = document.querySelector('#app') || document.body;
-      const vueRoot = appEl?.__vue__ || appEl?._vnode?.context;
-      if (vueRoot) {
-        const walk = (vm, depth = 0) => {
-          if (!vm || depth > 6) return null;
-          const sum = vm.portfolio?.summary || vm.summary;
-          if (sum && sum.total_value !== undefined) {
-            return {
-              totalValue: Number(sum.total_value),
-              cash: Number(sum.cash_balance ?? state.cash),
-              positions: vm.portfolio?.positions || vm.positions || null,
-            };
-          }
-          for (const ch of vm.$children || []) {
-            const found = walk(ch, depth + 1);
-            if (found) return found;
-          }
-          return null;
-        };
-        const vData = walk(vueRoot);
-        if (vData && vData.totalValue > 0) return vData;
+      const allEls = document.querySelectorAll('#app, #app *');
+      let bestSummary = null;
+      let bestPositions = null;
+      let bestTransactions = null;
+      for (let i = 0; i < Math.min(allEls.length, 400); i++) {
+        const el = allEls[i];
+        const vm = el.__vue__ || el._vnode?.context || el.__vueParentComponent?.ctx;
+        if (!vm) continue;
+
+        const sum =
+          vm.portfolio?.summary ??
+          vm.summary ??
+          vm.$data?.portfolio?.summary ??
+          vm.$data?.summary;
+        if (sum && sum.total_value !== undefined) {
+          bestSummary = sum;
+        }
+        const pos =
+          vm.portfolio?.positions ??
+          vm.positions ??
+          vm.$data?.portfolio?.positions ??
+          vm.$data?.positions;
+        if (Array.isArray(pos) && pos.length > 0) {
+          bestPositions = pos;
+        }
+        const txs =
+          vm.transactions?.transactions ??
+          vm.transactions ??
+          vm.$data?.transactions?.transactions ??
+          vm.$data?.transactions;
+        if (Array.isArray(txs) && txs.length > 0) {
+          bestTransactions = txs;
+        }
       }
 
-      // 2. Check visible text on /player/trade or /player/portfolio ("Cash balance 1000000$" / "Portfolio value 1000000$")
+      if (bestSummary || bestPositions || bestTransactions) {
+        return {
+          totalValue: bestSummary ? Number(bestSummary.total_value) : 0,
+          cash: bestSummary && bestSummary.cash_balance !== undefined ? Number(bestSummary.cash_balance) : undefined,
+          positions: bestPositions,
+          transactions: bestTransactions,
+        };
+      }
+
+      // Fallback: Check visible text on /player/trade or /player/portfolio ("Cash balance 1000000$" / "Portfolio value 1000000$")
       const bodyText = document.body?.innerText || '';
       const pvMatch = bodyText.match(/(?:Portfolio value|Valeur du portefeuille)\s*[:\n\t]*\s*([0-9,\s]+(?:\.\d+)?)\s*\$/i) ||
                       bodyText.match(/\$\s*([0-9,]+(?:\.\d+)?)\s*(?:Portfolio value|Valeur du portefeuille)/i);
@@ -730,7 +846,7 @@
         const pv = Number(pvMatch[1].replace(/[,\s]/g, ''));
         const cb = cbMatch ? Number(cbMatch[1].replace(/[,\s]/g, '')) : null;
         if (pv > 0) {
-          return { totalValue: pv, cash: cb !== null && cb >= 0 ? cb : state.cash, positions: null };
+          return { totalValue: pv, cash: cb !== null && cb >= 0 ? cb : state.cash, positions: null, transactions: null };
         }
       }
     } catch (_) {}
@@ -786,6 +902,7 @@
     const openCol = openPnlDollars > 0 ? '#4ade80' : openPnlDollars < 0 ? '#f87171' : '#e2e8f0';
 
     elStatus.textContent = state.statusMsg ? `(${state.statusMsg})` : '';
+    if (elSimBadge) elSimBadge.textContent = `#${cfg.simId}`;
     elPlayerBadge.textContent = cfg.playerName
       ? `[${cfg.playerName} #${cfg.playerId}]`
       : `[Player #${cfg.playerId}]`;
@@ -1110,8 +1227,53 @@
 
       const products = Array.isArray(productsRes) ? productsRes : productsRes.data || [];
       state.products = products;
-      if (txRes) {
-        computeCostBasisFromTransactions(txRes);
+      const nativeSnap = readNativePortfolioTotals();
+
+      // Extract actual current quantities per stock from portfolioRes (or native Vue positions) BEFORE running transaction cost-basis solver
+      const actualQuantitiesBySym = {};
+      const rawPosPre =
+        (Array.isArray(portfolioRes?.positions) && portfolioRes.positions.length > 0
+          ? portfolioRes.positions
+          : null) ??
+        portfolioRes?.items ??
+        portfolioRes?.financial_products ??
+        portfolioRes?.data?.positions ??
+        nativeSnap?.positions ??
+        [];
+      const posListPre = Array.isArray(rawPosPre)
+        ? rawPosPre
+        : rawPosPre && typeof rawPosPre === 'object'
+        ? Object.entries(rawPosPre).map(([k, v]) =>
+            v && typeof v === 'object' ? { _key: k, ...v } : { _key: k, quantity: v }
+          )
+        : [];
+      for (const it of posListPre) {
+        if (!it || typeof it !== 'object') continue;
+        const s =
+          (it._key && KNOWN_TICKERS.has(String(it._key).toUpperCase())
+            ? String(it._key).toUpperCase()
+            : null) || resolveSymbol(it);
+        const q = Number(
+          it.quantity ??
+            it.qty ??
+            it.shares ??
+            it.number_of_shares ??
+            it.amount_of_shares ??
+            it.pivot?.quantity ??
+            it.position ??
+            0
+        );
+        if (s && q !== 0) actualQuantitiesBySym[s] = q;
+      }
+
+      const effectiveTxRes =
+        (txRes && ((Array.isArray(txRes.transactions) && txRes.transactions.length > 0) || (Array.isArray(txRes) && txRes.length > 0))
+          ? txRes
+          : null) ||
+        (nativeSnap?.transactions ? { transactions: nativeSnap.transactions } : txRes);
+
+      if (effectiveTxRes) {
+        computeCostBasisFromTransactions(effectiveTxRes, actualQuantitiesBySym);
       }
       const now = Date.now();
       for (const p of products) {
@@ -1157,6 +1319,7 @@
           portfolioRes.portfolio_value ??
           portfolioRes.data?.summary?.total_value;
         if (totalVal !== undefined && totalVal !== null) state.totalValue = Number(totalVal);
+        state.portfolioSummary = portfolioRes.summary || portfolioRes.data?.summary || null;
 
         // Also cross-check with /players entry for this playerId and native DOM/Vue state
         const teamEntry = state.teamPlayers.find((tp) => tp.id === String(cfg.playerId));
@@ -1183,10 +1346,13 @@
         }
 
         const rawPositions =
-          portfolioRes.positions ??
+          (Array.isArray(portfolioRes.positions) && portfolioRes.positions.length > 0
+            ? portfolioRes.positions
+            : null) ??
           portfolioRes.items ??
           portfolioRes.financial_products ??
           portfolioRes.data?.positions ??
+          nativeSnap?.positions ??
           [];
         let items = [];
         if (Array.isArray(rawPositions)) {
@@ -1249,7 +1415,7 @@
             entryPrice = explicitAvg;
           } else if (explicitCostTotal > 0) {
             entryPrice = explicitCostTotal / Math.abs(q);
-          } else if (prevHeld && prevHeld.avgPrice > 0) {
+          } else if (prevHeld && prevHeld.avgPrice > 0 && Math.abs(prevHeld.avgPrice - livePrice) > 0.0001) {
             if (prevHeld.qty === q) {
               entryPrice = prevHeld.avgPrice;
             } else if ((prevHeld.qty > 0 && q > prevHeld.qty) || (prevHeld.qty < 0 && q < prevHeld.qty)) {
@@ -1258,6 +1424,15 @@
                 (Math.abs(prevHeld.qty) * prevHeld.avgPrice + added * livePrice) / Math.abs(q);
             } else {
               entryPrice = prevHeld.avgPrice;
+            }
+          } else if (items.length === 1 && Math.abs(state.cash - 1000000) > 1) {
+            // Single position fallback: derive exact entry price from cash spent/received!
+            if (q > 0 && state.cash < 1000000) {
+              entryPrice = (1000000 - state.cash) / q;
+            } else if (q < 0 && state.cash > 1000000) {
+              entryPrice = (state.cash - 1000000) / Math.abs(q);
+            } else {
+              entryPrice = livePrice;
             }
           } else {
             entryPrice = livePrice;
