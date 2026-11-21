@@ -383,7 +383,8 @@
       );
       const amt = Number(tx.amount ?? tx.total ?? tx.total_amount ?? tx.value ?? tx.cost ?? 0);
       let unitP = Number(
-        tx.unit_price ??
+        tx.price_at_transaction ??
+          tx.unit_price ??
           tx.price ??
           tx.execution_price ??
           tx.share_price ??
@@ -1349,7 +1350,7 @@
               : null) || resolveSymbol(it);
           const fp = state.products.find((p) => (p.short_name || p.ticker) === sym);
 
-          // Find quantity across all possible field names
+          // Find quantity across all possible field names (and respect type_position === 'short')
           let q = Number(
             it.quantity ??
               it.qty ??
@@ -1361,17 +1362,20 @@
               0
           );
           if (q === 0 && typeof it.total_quantity === 'number') q = it.total_quantity;
+          if (String(it.type_position || '').toLowerCase() === 'short' && q > 0) {
+            q = -q;
+          }
           if (!sym || q === 0) continue;
 
-          const livePrice = Number(fp?.current_price ?? it.current_price ?? 0);
+          const livePrice = Number(fp?.current_price ?? it.current_price ?? it.unit_price ?? 0);
           const txBasis = state.txCostMap[sym];
           const prevHeld = state.holdings[sym];
 
-          // 1. Check if portfolio payload gives explicit average / purchase price or cost basis
-          // NOTE: Do NOT use it.unit_price if it equals livePrice!
+          // 1. Check if portfolio payload gives explicit average_cost / purchase price
           const candidateUnitP = Number(it.unit_price ?? it.pivot?.unit_price ?? 0);
           const explicitAvg = Number(
-            it.average_price ??
+            it.average_cost ??
+              it.average_price ??
               it.avg_price ??
               it.purchase_price ??
               it.buy_price ??
@@ -1384,12 +1388,12 @@
             it.cost_basis ?? it.book_value ?? it.invested_amount ?? it.initial_value ?? 0
           );
 
-          // 2. Determine true entry price (priority: /transactions cost basis -> explicitAvg -> explicitCostTotal/q -> previous tracked entry -> livePrice)
+          // 2. Determine true entry price (priority: explicitAvg (average_cost) -> /transactions cost basis -> explicitCostTotal/q -> previous tracked entry -> livePrice)
           let entryPrice = 0;
-          if (txBasis && txBasis.avgPrice > 0) {
-            entryPrice = txBasis.avgPrice;
-          } else if (explicitAvg > 0) {
+          if (explicitAvg > 0) {
             entryPrice = explicitAvg;
+          } else if (txBasis && txBasis.avgPrice > 0) {
+            entryPrice = txBasis.avgPrice;
           } else if (explicitCostTotal > 0) {
             entryPrice = explicitCostTotal / Math.abs(q);
           } else if (prevHeld && prevHeld.avgPrice > 0 && Math.abs(prevHeld.avgPrice - livePrice) > 0.0001) {
@@ -1402,21 +1406,13 @@
             } else {
               entryPrice = prevHeld.avgPrice;
             }
-          } else if (items.length === 1 && Math.abs(state.cash - 1000000) > 1) {
-            // Single position fallback: derive exact entry price from cash spent/received!
-            if (q > 0 && state.cash < 1000000) {
-              entryPrice = (1000000 - state.cash) / q;
-            } else if (q < 0 && state.cash > 1000000) {
-              entryPrice = (state.cash - 1000000) / Math.abs(q);
-            } else {
-              entryPrice = livePrice;
-            }
           } else {
             entryPrice = livePrice;
           }
 
-          // 3. Check if portfolio payload provides explicit unrealized profit/loss
+          // 3. Check if portfolio payload provides explicit unrealized profit/loss (gain_loss)
           const explicitPnl =
+            it.gain_loss ??
             it.profit_loss ??
             it.pnl ??
             it.unrealized_pnl ??
