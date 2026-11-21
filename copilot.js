@@ -18,10 +18,12 @@
     window.__BOURSIFY_COPILOT__.destroy();
   }
 
-  const STORAGE_KEY = 'boursify_copilot_cfg_v6';
+  const STORAGE_KEY = 'boursify_copilot_cfg_v7';
   const defaultCfg = {
     simId: '448',
     playerId: '38158',
+    playerName: '',
+    idConfirmed: false,
     pollMs: 2000,
     prefillEnabled: false,
     allocPct: 20,        // 20% of TOTAL PORTFOLIO VALUE
@@ -35,7 +37,7 @@
   let cfg = { ...defaultCfg };
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
-    cfg = { ...defaultCfg, ...saved };
+    cfg = { ...defaultCfg, ...saved, idConfirmed: false };
   } catch (_) {}
 
   const saveCfg = () => {
@@ -46,19 +48,106 @@
 
   const detectIds = () => {
     try {
-      const entries = performance.getEntriesByType('resource') || [];
-      for (let i = entries.length - 1; i >= 0; i--) {
-        const m = entries[i].name.match(/\/resources\/simulation\/(\d+)\/player\/(\d+)/);
+      // 1. Only inspect XHR / fetch resources that do NOT come from our own copilot script
+      // Specifically look for Boursify's native Print link or Vue component props in the DOM first!
+      const printLink = document.querySelector('a[href*="/resources/simulation/"][href*="/player/"]');
+      if (printLink) {
+        const m = printLink.getAttribute('href').match(/\/resources\/simulation\/(\d+)\/player\/(\d+)/);
         if (m) {
           cfg.simId = m[1];
           cfg.playerId = m[2];
+          cfg.idConfirmed = true;
           saveCfg();
-          return;
+          return true;
+        }
+      }
+
+      // 2. Inspect Vue root / component instances for player.id and simulation.id
+      const appEl = document.querySelector('#app') || document.body;
+      const vueRoot = appEl?.__vue__ || appEl?._vnode?.context;
+      if (vueRoot) {
+        const walkVue = (vm, depth = 0) => {
+          if (!vm || depth > 5) return false;
+          const pId =
+            vm.player?.id ??
+            vm.currentPlayer?.id ??
+            vm.$store?.state?.player?.id ??
+            vm.$root?.player?.id;
+          const sId =
+            vm.simulation?.id ??
+            vm.player?.simulation_id ??
+            vm.$store?.state?.simulation?.id ??
+            vm.$root?.simulation?.id;
+          if (pId) {
+            cfg.playerId = String(pId);
+            if (sId) cfg.simId = String(sId);
+            cfg.idConfirmed = true;
+            saveCfg();
+            return true;
+          }
+          const children = vm.$children || [];
+          for (const ch of children) {
+            if (walkVue(ch, depth + 1)) return true;
+          }
+          return false;
+        };
+        if (walkVue(vueRoot)) return true;
+      }
+
+      // 3. Inspect inline scripts / HTML for player ID or simulation ID
+      const html = document.documentElement?.innerHTML || '';
+      const pm = html.match(/\/resources\/simulation\/(\d+)\/player\/(\d+)/);
+      if (pm) {
+        cfg.simId = pm[1];
+        cfg.playerId = pm[2];
+        cfg.idConfirmed = true;
+        saveCfg();
+        return true;
+      }
+
+      // 4. Inspect performance entries ONLY BEFORE our first poll runs (so we don't match our own fetch!)
+      if (!window.__BC_POLL_STARTED__) {
+        const entries = performance.getEntriesByType('resource') || [];
+        for (let i = entries.length - 1; i >= 0; i--) {
+          const m = entries[i].name.match(/\/resources\/simulation\/(\d+)\/player\/(\d+)/);
+          if (m) {
+            cfg.simId = m[1];
+            cfg.playerId = m[2];
+            cfg.idConfirmed = true;
+            saveCfg();
+            return true;
+          }
         }
       }
     } catch (_) {}
+    return false;
   };
   detectIds();
+
+  // Also hook XMLHttpRequest (which Boursify's Axios uses; our copilot uses fetch) so any native Boursify request locks in the real simId & playerId
+  const captureUrlIds = (urlStr) => {
+    if (typeof urlStr !== 'string') return;
+    const m = urlStr.match(/\/resources\/simulation\/(\d+)\/player\/(\d+)/);
+    if (m) {
+      cfg.simId = m[1];
+      cfg.playerId = m[2];
+      cfg.idConfirmed = true;
+      saveCfg();
+    }
+  };
+  try {
+    const origOpen = XMLHttpRequest.prototype.open;
+    if (origOpen && !origOpen.__bcHooked) {
+      const wrappedOpen = function (method, url, ...rest) {
+        try {
+          captureUrlIds(String(url || ''));
+        } catch (_) {}
+        return origOpen.call(this, method, url, ...rest);
+      };
+      wrappedOpen.__bcHooked = true;
+      XMLHttpRequest.prototype.open = wrappedOpen;
+    }
+  } catch (_) {}
 
   const START_PRICES = {
     RAI: 48.0,
@@ -82,6 +171,7 @@
     totalValue: 1000000,
     holdings: {},          // { sym: { qty, avgPrice, pnlDollars, pnlPct, totalAmount } }
     txCostMap: {},         // { sym: { qty, avgPrice } } reconstructed from /transactions
+    teamPlayers: [],       // [{ id, name, cash, totalValue }] from /players
     pollTick: 0,
     lastPollAt: null,
     lastError: null,
@@ -89,11 +179,148 @@
     timer: null,
   };
 
+  const KNOWN_TICKERS = new Set(['RAI', 'PAL', 'ALE', 'TAG', 'HAW', 'LIA', 'NOR', 'CHA', 'PIN', 'HOL']);
+  const NAME_TO_TICKER = {
+    'rubicon': 'RAI',
+    'palissade': 'PAL',
+    'aldren': 'ALE',
+    'taïga': 'TAG',
+    'taiga': 'TAG',
+    'grayhawk': 'HAW',
+    'hydrélia': 'LIA',
+    'hydrelia': 'LIA',
+    'northline': 'NOR',
+    'champlain': 'CHA',
+    'papineau': 'PIN',
+    'hollis': 'HOL',
+  };
+
+  // Resolve ticker symbol from any Boursify position or transaction object
+  const resolveSymbol = (obj) => {
+    if (!obj || typeof obj !== 'object') return null;
+
+    // 1. Direct string fields
+    const directCandidates = [
+      obj.short_name,
+      obj.ticker,
+      obj.symbol,
+      obj.code,
+      obj.financial_product?.short_name,
+      obj.financial_product?.ticker,
+      obj.financial_product?.marketable?.ticker,
+      obj.financial_product?.marketable?.short_name,
+      obj.marketable?.ticker,
+      obj.marketable?.short_name,
+      obj.product?.short_name,
+      obj.product?.ticker,
+      obj.stock?.ticker,
+      obj.stock?.short_name,
+    ];
+    for (const c of directCandidates) {
+      if (typeof c === 'string') {
+        const up = c.trim().toUpperCase();
+        if (KNOWN_TICKERS.has(up)) return up;
+      }
+    }
+
+    // 2. Match by product ID against state.products (check both financial_product.id and marketable.id)
+    const idCandidates = [
+      obj.financial_product_id,
+      obj.product_id,
+      obj.marketable_id,
+      obj.stock_id,
+      obj.financial_product?.id,
+      obj.financial_product?.marketable_id,
+      obj.marketable?.id,
+      obj.pivot?.financial_product_id,
+      obj.id,
+    ].filter((x) => x !== undefined && x !== null);
+
+    for (const idVal of idCandidates) {
+      const fp = state.products.find(
+        (p) =>
+          String(p.id) === String(idVal) ||
+          String(p.marketable_id) === String(idVal) ||
+          String(p.marketable?.id) === String(idVal) ||
+          String(p.portal_original_uuid) === String(idVal)
+      );
+      if (fp) {
+        const s = (fp.short_name || fp.ticker || fp.marketable?.ticker || '').toUpperCase();
+        if (s) return s;
+      }
+    }
+
+    // 3. Deep scan all string values in the object for known ticker or company name
+    const jsonStr = JSON.stringify(obj);
+    for (const tk of KNOWN_TICKERS) {
+      const re = new RegExp(`"(?:ticker|short_name|symbol|code)"\\s*:\\s*"${tk}"`, 'i');
+      if (re.test(jsonStr)) return tk;
+    }
+    const lowerStr = jsonStr.toLowerCase();
+    for (const [kw, tk] of Object.entries(NAME_TO_TICKER)) {
+      if (lowerStr.includes(kw)) return tk;
+    }
+
+    return null;
+  };
+
+  // Scrape any visible portfolio / transaction rows from the Boursify page DOM as a secondary source
+  const scrapeDomHoldingsAndTx = () => {
+    const domPos = {}; // { sym: { qty, avgPrice, pnlDollars } }
+    try {
+      const rows = Array.from(document.querySelectorAll('table tr, tbody tr'));
+      for (const tr of rows) {
+        const cells = Array.from(tr.querySelectorAll('td')).map((td) => td.textContent.trim());
+        if (cells.length < 2) continue;
+        const rowText = cells.join(' | ');
+        let matchedSym = null;
+        for (const c of cells) {
+          const up = c.toUpperCase();
+          if (KNOWN_TICKERS.has(up)) {
+            matchedSym = up;
+            break;
+          }
+        }
+        if (!matchedSym) {
+          const lower = rowText.toLowerCase();
+          for (const [kw, tk] of Object.entries(NAME_TO_TICKER)) {
+            if (lower.includes(kw)) {
+              matchedSym = tk;
+              break;
+            }
+          }
+        }
+        if (!matchedSym) continue;
+
+        // Parse numbers from cells (excluding cell that is just a row index #1, #2 or ticker)
+        const nums = [];
+        for (const c of cells) {
+          if (c.toUpperCase() === matchedSym || /^#\d+$/.test(c)) continue;
+          const cleaned = c.replace(/[$,\s]/g, '');
+          if (/^-?\d+(\.\d+)?$/.test(cleaned)) {
+            nums.push(Number(cleaned));
+          }
+        }
+        if (nums.length >= 1) {
+          // Typically [quantity, unit_price, amount]
+          const qty = nums[0];
+          const unitP = nums.length >= 2 ? nums[1] : 0;
+          if (qty !== 0 && Math.abs(qty) < 10000000) {
+            if (!domPos[matchedSym]) {
+              domPos[matchedSym] = { qty, avgPrice: unitP > 0 && unitP < 5000 ? unitP : 0 };
+            }
+          }
+        }
+      }
+    } catch (_) {}
+    return domPos;
+  };
+
   // Reconstruct exact average purchase/short entry price per stock from transaction history
   const computeCostBasisFromTransactions = (txRes) => {
     const list = Array.isArray(txRes)
       ? txRes
-      : txRes?.transactions || txRes?.data || [];
+      : txRes?.transactions || txRes?.data?.transactions || txRes?.data || [];
     if (!Array.isArray(list) || !list.length) return;
 
     // Check chronological order: if the first item has a larger ID than the last item, reverse it (newest-first -> oldest-first)
@@ -113,47 +340,48 @@
     const map = {}; // { sym: { qty: 0, avgPrice: 0 } }
     for (const tx of sorted) {
       if (!tx || typeof tx !== 'object') continue;
-      const prodId =
-        tx.financial_product_id ??
-        tx.product_id ??
-        tx.financial_product?.id ??
-        tx.marketable?.id;
-      const fp =
-        tx.financial_product ||
-        state.products.find(
-          (p) =>
-            (prodId !== undefined && String(p.id) === String(prodId)) ||
-            (tx.ticker && (p.short_name === tx.ticker || p.marketable?.ticker === tx.ticker)) ||
-            (tx.short_name && p.short_name === tx.short_name) ||
-            (tx.name && (p.marketable?.name === tx.name || p.name === tx.name))
-        );
-      const sym =
-        tx.short_name ||
-        tx.ticker ||
-        tx.symbol ||
-        tx.financial_product?.short_name ||
-        tx.financial_product?.ticker ||
-        tx.marketable?.ticker ||
-        tx.marketable?.short_name ||
-        fp?.short_name ||
-        fp?.ticker;
+      const sym = resolveSymbol(tx);
       if (!sym) continue;
 
-      let rawQ = Number(tx.quantity ?? tx.qty ?? tx.shares ?? 0);
+      let rawQ = Number(
+        tx.quantity ??
+          tx.qty ??
+          tx.shares ??
+          tx.number_of_shares ??
+          tx.amount_of_shares ??
+          tx.pivot?.quantity ??
+          0
+      );
+      const amt = Number(tx.amount ?? tx.total ?? tx.total_amount ?? tx.value ?? tx.cost ?? 0);
       const unitP = Number(
         tx.unit_price ??
           tx.price ??
           tx.execution_price ??
+          tx.share_price ??
           tx.average_price ??
-          (rawQ !== 0 && tx.amount ? Math.abs(Number(tx.amount)) / Math.abs(rawQ) : 0)
+          (rawQ !== 0 && amt !== 0 ? Math.abs(amt) / Math.abs(rawQ) : 0)
       );
       if (!rawQ || unitP <= 0) continue;
 
-      const typeStr = String(tx.type ?? tx.side ?? tx.action ?? tx.transaction_type ?? '').toLowerCase();
+      const typeStr = String(
+        tx.type ?? tx.side ?? tx.action ?? tx.transaction_type ?? tx.order_type ?? ''
+      ).toLowerCase();
       let signedQ = rawQ;
-      if (typeStr.includes('sell') || typeStr.includes('vente') || typeStr.includes('short')) {
+      if (
+        typeStr.includes('sell') ||
+        typeStr.includes('vente') ||
+        typeStr.includes('vendre') ||
+        typeStr.includes('short') ||
+        typeStr === 's' ||
+        (typeStr === '' && amt < 0 && rawQ > 0)
+      ) {
         signedQ = -Math.abs(rawQ);
-      } else if (typeStr.includes('buy') || typeStr.includes('achat')) {
+      } else if (
+        typeStr.includes('buy') ||
+        typeStr.includes('achat') ||
+        typeStr.includes('acheter') ||
+        typeStr === 'b'
+      ) {
         signedQ = Math.abs(rawQ);
       }
 
@@ -384,7 +612,7 @@
   const root = document.createElement('div');
   root.id = 'boursify-copilot-root';
   const applyWidth = () => {
-    root.style.width = cfg.wideMode ? '670px' : '510px';
+    root.style.width = cfg.wideMode ? '640px' : '500px';
   };
   root.style.cssText = [
     'position:fixed', 'bottom:14px', 'right:14px', 'z-index:999999',
@@ -398,7 +626,7 @@
   root.innerHTML = `
     <div id="bc-drag-handle" style="display:flex;justify-content:space-between;align-items:center;padding:9px 12px;background:#1e293b;border-bottom:1px solid #334155;cursor:move;user-select:none;">
       <div style="min-width:0;padding-right:8px;">
-        <div style="font-weight:700;font-size:13px;">Boursify 20% Portfolio Sizer & Price Radar <span style="color:#38bdf8">#${esc(cfg.simId)}</span> <span id="bc-status-msg" style="font-size:10px;color:#4ade80;"></span></div>
+        <div style="font-weight:700;font-size:13px;">Boursify 20% Portfolio Sizer & Price Radar <span style="color:#38bdf8">#${esc(cfg.simId)}</span> <span id="bc-player-badge" style="font-size:10px;color:#fbbf24;cursor:pointer;text-decoration:underline;" title="Click to switch active team player account"></span> <span id="bc-status-msg" style="font-size:10px;color:#4ade80;"></span></div>
         <div id="bc-cash-line" style="color:#94a3b8;font-size:10px;">Total: $1,000,000 · Cash: $1,000,000</div>
       </div>
       <div style="display:flex;gap:5px;align-items:center;flex-shrink:0;">
@@ -424,11 +652,11 @@
           <button id="bc-toggle-round" style="background:#2563eb;color:#e2e8f0;border:none;border-radius:4px;padding:2px 7px;cursor:pointer;font-size:10px;">Round: ON</button>
         </div>
       </div>
-      <div style="display:grid;grid-template-columns:1.05fr 1.1fr 1.2fr 0.95fr;font-weight:700;font-size:10px;color:#94a3b8;padding:0 2px;">
-        <span>STOCK · POSITION P&L</span>
-        <span style="text-align:right;">PRICE · DRIFT AVG</span>
-        <span style="text-align:right;">UP / DOWN vs AVERAGE</span>
-        <span id="bc-col-sh-hdr" style="text-align:right;">${cfg.allocPct}% PORT SHARES</span>
+      <div style="display:grid;grid-template-columns:1.1fr 0.9fr 1.05fr 0.95fr;font-weight:700;font-size:10px;color:#94a3b8;padding:0 2px;">
+        <span>STOCK · P&L</span>
+        <span style="text-align:right;">PRICE · AVG</span>
+        <span style="text-align:right;">UP / DOWN vs AVG</span>
+        <span id="bc-col-sh-hdr" style="text-align:right;">${cfg.allocPct}% SHARES</span>
       </div>
       <div id="bc-quotes-list" style="overflow-y:auto;max-height:540px;padding-right:2px;"></div>
     </div>
@@ -436,6 +664,7 @@
   document.body.appendChild(root);
 
   const elStatus = root.querySelector('#bc-status-msg');
+  const elPlayerBadge = root.querySelector('#bc-player-badge');
   const elCash = root.querySelector('#bc-cash-line');
   const elWideBtn = root.querySelector('#bc-toggle-wide');
   const elPrefillBtn = root.querySelector('#bc-toggle-prefill');
@@ -483,9 +712,12 @@
     const openCol = openPnlDollars >= 0 ? '#4ade80' : '#f87171';
 
     elStatus.textContent = state.statusMsg ? `(${state.statusMsg})` : '';
-    elCash.innerHTML = `Total: <b>$${Math.round(state.totalValue).toLocaleString()}</b> <span style="color:${retCol};font-weight:700;">(${fmtDollarsSigned(totalPnlDollars)} / ${retPct >= 0 ? '+' : ''}${retPct.toFixed(2)}%)</span> · Open P&L (${openPositionsCount}): <b style="color:${openCol}">${fmtDollarsSigned(openPnlDollars)}</b> · Cash: <b>$${Math.round(state.cash).toLocaleString()}</b> · Mkt: <b style="color:${mktCol}">${state.mktAvgDriftPct >= 0 ? '+' : ''}${state.mktAvgDriftPct.toFixed(1)}%</b>`;
+    elPlayerBadge.textContent = cfg.playerName
+      ? `[${cfg.playerName} #${cfg.playerId}]`
+      : `[Player #${cfg.playerId}]`;
+    elCash.innerHTML = `Total: <b>$${Math.round(state.totalValue).toLocaleString()}</b> <span style="color:${retCol};font-weight:700;">(${fmtDollarsSigned(totalPnlDollars)} / ${retPct >= 0 ? '+' : ''}${retPct.toFixed(1)}%)</span> · Open P&L: <b style="color:${openCol}">${fmtDollarsSigned(openPnlDollars)}</b> · Cash: <b>$${Math.round(state.cash).toLocaleString()}</b>`;
     elBudgetPill.textContent = `= $${targetDollars.toLocaleString()}`;
-    elColShHdr.textContent = `${pct}% PORT SHARES`;
+    elColShHdr.textContent = `${pct}% SHARES`;
     elAvgModeBtn.textContent =
       cfg.avgMode === 'ROLLING'
         ? 'Avg: Roll 3m'
@@ -533,43 +765,26 @@
           startP,
           refAvg,
           vsAvgPct,
-          vsRollPct,
-          vsMktPct,
-          vsStartPct,
-          hi,
-          lo,
-          offHighPct,
-          offLowPct,
-          rangePos,
-          chg30s,
           chg1m,
-          chg3m,
         } = m;
 
-        // Every stock gets an explicit UP or DOWN vs Average badge (adjusted for upward drift):
-        // Strong DIP (<= -1.5%) -> bright green BUY DIP; Mild DOWN (< 0%) -> green DOWN vs Avg
-        // Strong PEAK (>= +1.5%) -> bright red SHORT/SELL; Mild UP (>= 0%) -> amber/red UP vs Avg
+        // Clean, direct UP or DOWN vs Average badge (adjusted for upward drift)
         const isStrongDip = vsAvgPct <= -1.5;
         const isStrongPeak = vsAvgPct >= 1.5;
         const isDown = vsAvgPct < 0;
 
         let signalBadge = '';
         if (isStrongDip) {
-          signalBadge = `<span style="background:#14532d;color:#4ade80;padding:1px 5px;border-radius:3px;font-weight:700;font-size:10px;">▼ DOWN ${vsAvgPct.toFixed(1)}% vs Avg (BUY DIP)</span>`;
+          signalBadge = `<span style="background:#14532d;color:#4ade80;padding:2px 6px;border-radius:4px;font-weight:700;font-size:11px;display:inline-block;">▼ DOWN ${vsAvgPct.toFixed(1)}% (BUY)</span>`;
         } else if (isDown) {
-          signalBadge = `<span style="background:#064e3b;color:#6ee7b7;padding:1px 5px;border-radius:3px;font-weight:600;font-size:10px;">▼ DOWN ${vsAvgPct.toFixed(1)}% vs Avg</span>`;
+          signalBadge = `<span style="background:#064e3b;color:#6ee7b7;padding:2px 6px;border-radius:4px;font-weight:600;font-size:11px;display:inline-block;">▼ DOWN ${vsAvgPct.toFixed(1)}%</span>`;
         } else if (isStrongPeak) {
-          signalBadge = `<span style="background:#7f1d1d;color:#fca5a5;padding:1px 5px;border-radius:3px;font-weight:700;font-size:10px;">▲ UP +${vsAvgPct.toFixed(1)}% vs Avg (SHORT)</span>`;
+          signalBadge = `<span style="background:#7f1d1d;color:#fca5a5;padding:2px 6px;border-radius:4px;font-weight:700;font-size:11px;display:inline-block;">▲ UP +${vsAvgPct.toFixed(1)}% (SHORT)</span>`;
         } else {
-          signalBadge = `<span style="background:#451a03;color:#fcd34d;padding:1px 5px;border-radius:3px;font-weight:600;font-size:10px;">▲ UP +${vsAvgPct.toFixed(1)}% vs Avg</span>`;
+          signalBadge = `<span style="background:#451a03;color:#fcd34d;padding:2px 6px;border-radius:4px;font-weight:600;font-size:11px;display:inline-block;">▲ UP +${vsAvgPct.toFixed(1)}%</span>`;
         }
 
-        const vsStartCol = vsStartPct > 0.1 ? '#4ade80' : vsStartPct < -0.1 ? '#f87171' : '#94a3b8';
-        const cRoll = vsRollPct < -0.1 ? '#4ade80' : vsRollPct > 0.1 ? '#f87171' : '#94a3b8';
-        const cMkt = vsMktPct < -0.1 ? '#4ade80' : vsMktPct > 0.1 ? '#f87171' : '#94a3b8';
-        const c30 = chg30s > 0.05 ? '#4ade80' : chg30s < -0.05 ? '#f87171' : '#94a3b8';
         const c1m = chg1m > 0.05 ? '#4ade80' : chg1m < -0.05 ? '#f87171' : '#94a3b8';
-        const c3m = chg3m > 0.05 ? '#4ade80' : chg3m < -0.05 ? '#f87171' : '#94a3b8';
 
         const held = state.holdings[sym];
         const qty = held?.qty || 0;
@@ -593,62 +808,48 @@
           const pnlCol = pnlDollars > 0 ? '#4ade80' : pnlDollars < 0 ? '#f87171' : '#e2e8f0';
           const pnlBg = pnlDollars > 0 ? '#052e16' : pnlDollars < 0 ? '#450a0a' : '#1e293b';
           const sideTag = qty > 0 ? 'LONG' : 'SHORT';
-          const posVal = Math.round(Math.abs(qty) * price).toLocaleString();
           heldLine = `
             <div style="font-size:10px;color:#cbd5e1;">
               <span style="color:#38bdf8;font-weight:700;">${qty.toLocaleString()} sh</span>
-              <span style="color:#94a3b8;font-size:9px;">(${sideTag} @$${entryP.toFixed(2)} · $${posVal})</span>
+              <span style="color:#94a3b8;font-size:10px;">(${sideTag} @$${entryP.toFixed(2)})</span>
             </div>
             <div style="margin-top:2px;">
-              <span style="background:${pnlBg};color:${pnlCol};border:1px solid ${pnlCol}44;padding:1px 5px;border-radius:3px;font-weight:700;font-size:10px;display:inline-block;">
-                P&L: ${fmtDollarsSigned(pnlDollars)} (${fmtPct(pnlPct)})
+              <span style="background:${pnlBg};color:${pnlCol};border:1px solid ${pnlCol}55;padding:1px 6px;border-radius:4px;font-weight:700;font-size:11px;display:inline-block;">
+                ${fmtDollarsSigned(pnlDollars)} (${fmtPct(pnlPct)})
               </span>
             </div>`;
         }
 
         const pctShares = calcPortfolioPctShares(price);
         const fillBtns = cfg.prefillEnabled
-          ? `<div style="display:flex;justify-content:flex-end;gap:3px;margin-top:2px;">
-              <button data-fill-side="BUY" data-fill-sym="${esc(sym)}" data-fill-id="${esc(p.id)}" data-fill-qty="${pctShares}" title="Pre-fill BUY ${pctShares} sh" style="background:#16a34a;color:#fff;border:none;border-radius:3px;padding:1px 6px;cursor:pointer;font-size:10px;font-weight:700;">Buy</button>
-              <button data-fill-side="SELL" data-fill-sym="${esc(sym)}" data-fill-id="${esc(p.id)}" data-fill-qty="${pctShares}" title="Pre-fill SELL/SHORT ${pctShares} sh" style="background:#dc2626;color:#fff;border:none;border-radius:3px;padding:1px 6px;cursor:pointer;font-size:10px;font-weight:700;">Short</button>
+          ? `<div style="display:flex;justify-content:flex-end;gap:3px;margin-top:3px;">
+              <button data-fill-side="BUY" data-fill-sym="${esc(sym)}" data-fill-id="${esc(p.id)}" data-fill-qty="${pctShares}" title="Pre-fill BUY ${pctShares} sh" style="background:#16a34a;color:#fff;border:none;border-radius:3px;padding:2px 7px;cursor:pointer;font-size:10px;font-weight:700;">Buy</button>
+              <button data-fill-side="SELL" data-fill-sym="${esc(sym)}" data-fill-id="${esc(p.id)}" data-fill-qty="${pctShares}" title="Pre-fill SELL/SHORT ${pctShares} sh" style="background:#dc2626;color:#fff;border:none;border-radius:3px;padding:2px 7px;cursor:pointer;font-size:10px;font-weight:700;">Short</button>
               ${
                 qty !== 0
-                  ? `<button data-fill-side="${qty > 0 ? 'SELL' : 'BUY'}" data-fill-sym="${esc(sym)}" data-fill-id="${esc(p.id)}" data-fill-qty="${Math.abs(qty)}" title="Close full position (${Math.abs(qty)} sh)" style="background:#475569;color:#fff;border:none;border-radius:3px;padding:1px 5px;cursor:pointer;font-size:10px;">Exit</button>`
+                  ? `<button data-fill-side="${qty > 0 ? 'SELL' : 'BUY'}" data-fill-sym="${esc(sym)}" data-fill-id="${esc(p.id)}" data-fill-qty="${Math.abs(qty)}" title="Close full position (${Math.abs(qty)} sh)" style="background:#475569;color:#fff;border:none;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px;">Exit</button>`
                   : ''
               }
             </div>`
           : '';
 
-        // Visual Low-to-High Range Bar
-        const barCol = isStrongDip ? '#4ade80' : isStrongPeak ? '#f87171' : '#38bdf8';
-        const rangeBar = `<div style="width:100%;height:4px;background:#1e293b;border-radius:2px;margin:2px 0;position:relative;overflow:hidden;">
-          <div style="width:${rangePos.toFixed(0)}%;height:100%;background:${barCol};"></div>
-        </div>`;
-
-        return `<div style="display:grid;grid-template-columns:1.05fr 1.1fr 1.2fr 0.95fr;align-items:center;gap:4px;padding:5px 2px;border-bottom:1px solid #1e293b;">
+        return `<div style="display:grid;grid-template-columns:1.1fr 0.9fr 1.05fr 0.95fr;align-items:center;gap:6px;padding:6px 2px;border-bottom:1px solid #1e293b;">
           <div>
-            <div style="font-weight:700;font-size:12px;">${esc(sym)}</div>
+            <div style="font-weight:700;font-size:13px;">${esc(sym)}</div>
             ${heldLine}
           </div>
           <div style="text-align:right;font-variant-numeric:tabular-nums;">
-            <div><b style="font-size:12px;">$${price.toFixed(2)}</b> <span style="color:${vsStartCol};font-size:10px;">(${fmtPct(vsStartPct)} start)</span></div>
-            <div style="color:#94a3b8;font-size:10px;">Avg <b>$${refAvg.toFixed(2)}</b> · Start $${startP.toFixed(0)}</div>
-            <div style="font-size:9px;color:#94a3b8;">
-              30s <span style="color:${c30}">${fmtPct(chg30s)}</span> · 1m <span style="color:${c1m}">${fmtPct(chg1m)}</span> · 3m <span style="color:${c3m}">${fmtPct(chg3m)}</span>
-            </div>
+            <div><b style="font-size:13px;">$${price.toFixed(2)}</b></div>
+            <div style="color:#94a3b8;font-size:10px;">Avg $${refAvg.toFixed(2)}</div>
           </div>
           <div style="text-align:right;font-variant-numeric:tabular-nums;">
             <div>${signalBadge}</div>
-            <div style="font-size:9px;color:#94a3b8;margin-top:1px;">
-              vs 3m Avg <span style="color:${cRoll};font-weight:600;">${fmtPct(vsRollPct)}</span> · vs Mkt <span style="color:${cMkt};font-weight:600;">${fmtPct(vsMktPct)}</span>
-            </div>
-            ${rangeBar}
-            <div style="font-size:9px;color:#94a3b8;">
-              Lo $${lo.toFixed(1)} (<span style="color:#4ade80">+${offLowPct.toFixed(1)}%</span>) · Hi $${hi.toFixed(1)} (<span style="color:#f87171">${offHighPct.toFixed(1)}%</span>)
+            <div style="font-size:10px;color:#94a3b8;margin-top:2px;">
+              1m: <span style="color:${c1m};font-weight:600;">${fmtPct(chg1m)}</span>
             </div>
           </div>
           <div style="text-align:right;font-variant-numeric:tabular-nums;">
-            <div><b style="color:#38bdf8;font-size:12px;">${pctShares.toLocaleString()} sh</b></div>
+            <div><b style="color:#38bdf8;font-size:13px;">${pctShares.toLocaleString()} sh</b></div>
             ${fillBtns}
           </div>
         </div>`;
@@ -662,6 +863,20 @@
   };
 
   // --- Controls ---
+  elPlayerBadge.addEventListener('click', () => {
+    if (state.teamPlayers.length > 1) {
+      const idx = state.teamPlayers.findIndex((tp) => String(tp.id) === String(cfg.playerId));
+      const next = state.teamPlayers[(idx + 1) % state.teamPlayers.length];
+      cfg.playerId = String(next.id);
+      cfg.playerName = next.name;
+      cfg.idConfirmed = true;
+      state.holdings = {};
+      state.txCostMap = {};
+      saveCfg();
+      poll();
+    }
+  });
+
   elWideBtn.addEventListener('click', () => {
     cfg.wideMode = !cfg.wideMode;
     saveCfg();
@@ -761,21 +976,55 @@
   window.addEventListener('mousemove', onMouseMove);
   window.addEventListener('mouseup', onMouseUp);
 
-  // --- Live Poller (Only /financial-products and /portfolio — fast & lightweight) ---
+  // --- Live Poller ---
   let isPolling = false;
   const poll = async () => {
     if (isPolling) return;
     isPolling = true;
+    detectIds();
+    window.__BC_POLL_STARTED__ = true;
     try {
       const base = `/resources/simulation/${cfg.simId}`;
       state.pollTick += 1;
-      const shouldFetchTx = state.pollTick === 1 || state.pollTick % 2 === 0;
+
+      // On first poll (or every 5th poll if player has 0 positions and $1M cash), check /players to auto-select the active trading account on the team!
+      if (state.pollTick === 1 || (!cfg.idConfirmed && state.pollTick % 3 === 0)) {
+        const playersRes = await fetchJson(`${base}/players`).catch(() => null);
+        const pList = Array.isArray(playersRes) ? playersRes : playersRes?.data || [];
+        if (Array.isArray(pList) && pList.length > 0) {
+          state.teamPlayers = pList.map((pl) => ({
+            id: String(pl.id),
+            name: pl.user?.first_name || pl.user?.full_name || `#${pl.player_number || pl.id}`,
+            cash: Number(pl.current_cash ?? 1000000),
+            totalValue: Number(pl.total_value ?? 1000000),
+          }));
+
+          // Match current cfg.playerId to set playerName
+          const curMatch = state.teamPlayers.find((tp) => tp.id === String(cfg.playerId));
+          if (curMatch) cfg.playerName = curMatch.name;
+
+          // If current playerId has untouched $1M cash & $1M totalValue, check if another teammate account is the one actively trading!
+          if (!cfg.idConfirmed) {
+            const activeTrader = state.teamPlayers.find(
+              (tp) => Math.abs(tp.cash - 1000000) > 1 || Math.abs(tp.totalValue - 1000000) > 1
+            );
+            if (activeTrader && activeTrader.id !== String(cfg.playerId)) {
+              cfg.playerId = activeTrader.id;
+              cfg.playerName = activeTrader.name;
+              saveCfg();
+            } else if (!curMatch && state.teamPlayers[0]) {
+              cfg.playerId = state.teamPlayers[0].id;
+              cfg.playerName = state.teamPlayers[0].name;
+              saveCfg();
+            }
+          }
+        }
+      }
+
       const [productsRes, portfolioRes, txRes] = await Promise.all([
         fetchJson(`${base}/financial-products`),
         fetchJson(`${base}/player/${cfg.playerId}/portfolio`),
-        shouldFetchTx
-          ? fetchJson(`${base}/player/${cfg.playerId}/transactions`).catch(() => null)
-          : Promise.resolve(null),
+        fetchJson(`${base}/player/${cfg.playerId}/transactions`).catch(() => null),
       ]);
 
       const products = Array.isArray(productsRes) ? productsRes : productsRes.data || [];
@@ -820,59 +1069,50 @@
         if (totalVal !== undefined) state.totalValue = Number(totalVal);
 
         const rawPositions =
-          portfolioRes.positions ||
-          portfolioRes.items ||
-          portfolioRes.financial_products ||
-          portfolioRes.data?.positions ||
+          portfolioRes.positions ??
+          portfolioRes.items ??
+          portfolioRes.financial_products ??
+          portfolioRes.data?.positions ??
           [];
-        const items = Array.isArray(rawPositions)
-          ? rawPositions
-          : rawPositions && typeof rawPositions === 'object'
-          ? Object.values(rawPositions)
-          : [];
+        let items = [];
+        if (Array.isArray(rawPositions)) {
+          items = rawPositions;
+        } else if (rawPositions && typeof rawPositions === 'object') {
+          items = Object.entries(rawPositions).map(([k, v]) =>
+            v && typeof v === 'object' ? { _key: k, ...v } : { _key: k, quantity: v }
+          );
+        }
 
         const nextHoldings = {};
         for (const it of items) {
           if (!it || typeof it !== 'object') continue;
-          const prodId =
-            it.financial_product_id ??
-            it.product_id ??
-            it.financial_product?.id ??
-            it.marketable?.id;
-          const fp =
-            it.financial_product ||
-            state.products.find(
-              (p) =>
-                (prodId !== undefined && String(p.id) === String(prodId)) ||
-                (it.ticker && (p.short_name === it.ticker || p.marketable?.ticker === it.ticker)) ||
-                (it.short_name && p.short_name === it.short_name) ||
-                (it.name && (p.marketable?.name === it.name || p.name === it.name))
-            );
           const sym =
-            it.short_name ||
-            it.ticker ||
-            it.symbol ||
-            it.financial_product?.short_name ||
-            it.financial_product?.ticker ||
-            it.marketable?.ticker ||
-            it.marketable?.short_name ||
-            fp?.short_name ||
-            fp?.ticker;
-          const q = Number(
+            (it._key && KNOWN_TICKERS.has(String(it._key).toUpperCase())
+              ? String(it._key).toUpperCase()
+              : null) || resolveSymbol(it);
+          const fp = state.products.find((p) => (p.short_name || p.ticker) === sym);
+
+          // Find quantity across all possible field names
+          let q = Number(
             it.quantity ??
               it.qty ??
               it.shares ??
+              it.number_of_shares ??
+              it.amount_of_shares ??
               it.pivot?.quantity ??
               it.position ??
               0
           );
+          if (q === 0 && typeof it.total_quantity === 'number') q = it.total_quantity;
           if (!sym || q === 0) continue;
 
-          const livePrice = Number(fp?.current_price ?? it.current_price ?? it.unit_price ?? 0);
+          const livePrice = Number(fp?.current_price ?? it.current_price ?? 0);
           const txBasis = state.txCostMap[sym];
           const prevHeld = state.holdings[sym];
 
           // 1. Check if portfolio payload gives explicit average / purchase price or cost basis
+          // NOTE: Do NOT use it.unit_price if it equals livePrice!
+          const candidateUnitP = Number(it.unit_price ?? it.pivot?.unit_price ?? 0);
           const explicitAvg = Number(
             it.average_price ??
               it.avg_price ??
@@ -881,21 +1121,20 @@
               it.entry_price ??
               it.cost_basis_per_share ??
               it.pivot?.average_price ??
-              it.pivot?.unit_price ??
-              0
+              (candidateUnitP > 0 && Math.abs(candidateUnitP - livePrice) > 0.001 ? candidateUnitP : 0)
           );
           const explicitCostTotal = Number(
             it.cost_basis ?? it.book_value ?? it.invested_amount ?? it.initial_value ?? 0
           );
 
-          // 2. Determine true entry price (priority: explicitAvg -> explicitCostTotal/q -> /transactions cost basis -> previous tracked entry -> livePrice)
+          // 2. Determine true entry price (priority: /transactions cost basis -> explicitAvg -> explicitCostTotal/q -> previous tracked entry -> livePrice)
           let entryPrice = 0;
-          if (explicitAvg > 0) {
+          if (txBasis && txBasis.avgPrice > 0) {
+            entryPrice = txBasis.avgPrice;
+          } else if (explicitAvg > 0) {
             entryPrice = explicitAvg;
           } else if (explicitCostTotal > 0) {
             entryPrice = explicitCostTotal / Math.abs(q);
-          } else if (txBasis && txBasis.avgPrice > 0) {
-            entryPrice = txBasis.avgPrice;
           } else if (prevHeld && prevHeld.avgPrice > 0) {
             if (prevHeld.qty === q) {
               entryPrice = prevHeld.avgPrice;
@@ -910,7 +1149,7 @@
             entryPrice = livePrice;
           }
 
-          // 3. Check if portfolio payload provides explicit unrealized profit/loss or total position value
+          // 3. Check if portfolio payload provides explicit unrealized profit/loss
           const explicitPnl =
             it.profit_loss ??
             it.pnl ??
@@ -918,7 +1157,6 @@
             it.gain ??
             it.return_amount ??
             null;
-          const posAmount = Number(it.amount ?? it.total_value ?? it.value ?? it.market_value ?? 0);
           let pnlDollars = 0;
           if (explicitPnl !== null && explicitPnl !== undefined) {
             pnlDollars = Number(explicitPnl);
@@ -927,8 +1165,6 @@
               q > 0
                 ? (livePrice - entryPrice) * q
                 : (entryPrice - livePrice) * Math.abs(q);
-          } else if (posAmount !== 0) {
-            pnlDollars = q > 0 ? posAmount - livePrice * q : livePrice * Math.abs(q) - Math.abs(posAmount);
           }
           const pnlPct =
             entryPrice > 0
@@ -945,7 +1181,7 @@
           };
         }
 
-        // Fallback: if portfolioRes.positions was empty or unmapped, also include any non-zero positions from /transactions
+        // Fallback 1: Include any non-zero positions reconstructed from /transactions
         for (const [sym, basis] of Object.entries(state.txCostMap)) {
           if (!nextHoldings[sym] && basis.qty !== 0 && basis.avgPrice > 0) {
             const fp = state.products.find((p) => (p.short_name || p.ticker) === sym);
@@ -965,6 +1201,37 @@
               pnlDollars,
               pnlPct,
             };
+          }
+        }
+
+        // Fallback 2: Scrape visible DOM table rows if API positions were still not matched
+        if (Object.keys(nextHoldings).length === 0) {
+          const domPos = scrapeDomHoldingsAndTx();
+          for (const [sym, d] of Object.entries(domPos)) {
+            if (d.qty !== 0) {
+              const fp = state.products.find((p) => (p.short_name || p.ticker) === sym);
+              const livePrice = Number(fp?.current_price || d.avgPrice || 0);
+              const prevHeld = state.holdings[sym];
+              const entryP =
+                state.txCostMap[sym]?.avgPrice ||
+                (d.avgPrice > 0 && Math.abs(d.avgPrice - livePrice) > 0.001 ? d.avgPrice : 0) ||
+                prevHeld?.avgPrice ||
+                livePrice;
+              const pnlDollars =
+                d.qty > 0 ? (livePrice - entryP) * d.qty : (entryP - livePrice) * Math.abs(d.qty);
+              const pnlPct =
+                entryP > 0
+                  ? d.qty > 0
+                    ? ((livePrice - entryP) / entryP) * 100
+                    : ((entryP - livePrice) / entryP) * 100
+                  : 0;
+              nextHoldings[sym] = {
+                qty: d.qty,
+                avgPrice: entryP,
+                pnlDollars,
+                pnlPct,
+              };
+            }
           }
         }
 
