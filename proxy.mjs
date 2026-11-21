@@ -98,7 +98,7 @@ const COMPANY_PLAYBOOK = `
 10. HOL (Hollis & Rowe, $82 start, Outdoor Apparel/Footwear, P/E 17.8, Beta 1.1, ROE 24.2%, $3.8B cash): CEO Grant Hollis. 70% Asia supply chain (Bangladesh, Vietnam, Taiwan). BEARISH: US tariffs on Asian imports, Fall 2030 EU supply-chain directive, NGO labour scandals, recession. BULLISH: Mexico shift, AI inventory (-30% unsold stock).
 `.trim();
 
-const buildPrompt = ({ headline, recentEvents = [], products = [], portfolio = {} }, curated = { actions: [] }) => {
+const buildPrompt = ({ headline, recentEvents = [], products = [], portfolio = {} }) => {
   const productLines = products.map((p) => {
     const chg = Number.isFinite(Number(p.chg60s)) ? `${Number(p.chg60s) >= 0 ? '+' : ''}${Number(p.chg60s).toFixed(2)}%` : 'n/a';
     return `- ${p.ticker} (${p.name}): price=$${Number(p.price || 0).toFixed(2)}, 60s=${chg}, start=$${p.startPrice ?? '?'}, ma50=${p.ma50 ?? '?'}`;
@@ -109,10 +109,6 @@ const buildPrompt = ({ headline, recentEvents = [], products = [], portfolio = {
   const holdingLines = holdingsEntries.length
     ? holdingsEntries.map(([sym, h]) => `${sym}: ${h.qty} shares @ avg $${Number(h.avgPrice || 0).toFixed(2)}`).join('; ')
     : 'None (100% cash)';
-
-  const curatedHintLines = (curated?.actions || []).map(
-    (a) => `- ${a.ticker}: ${a.action} (conviction ${a.conviction}, target ${a.target_pct}%) — ${a.reason}`
-  );
 
   return [
     'You are an institutional quantitative analyst advising a team in Grasset Stock Market Simulation 2026 (Boursify, Jan 2030-Jan 2031).',
@@ -130,13 +126,6 @@ const buildPrompt = ({ headline, recentEvents = [], products = [], portfolio = {
     ...(eventLines.length ? eventLines : ['None']),
     '',
     `NEW BREAKING HEADLINE TO ANALYZE:\n"${headline}"`,
-    ...(curatedHintLines.length
-      ? [
-          '',
-          'CURATED HANDBOOK RULE MATCHES FOR THIS HEADLINE (DO NOT CONTRADICT HIGH-CONVICTION DIRECTION):',
-          ...curatedHintLines,
-        ]
-      : []),
     '',
     'STRICT SIMULATION RULES:',
     '1. Transaction fee is $50 + 0.5% per trade (~1% round-trip). Skip minor noise; only trade clear catalysts.',
@@ -401,34 +390,15 @@ const server = http.createServer(async (req, res) => {
 
       try {
         const model = (body.model || DEFAULT_MODEL).trim();
-        const prompt = buildPrompt(body, curated);
+        const prompt = buildPrompt(body);
         const result = await callNvidia({ apiKey, model, prompt });
-
-        // Merge curated handbook guardrails with AI output so high-conviction handbook rules are never missed or inverted
-        const mergedMap = new Map();
-        for (const a of result.actions || []) {
-          if (a.ticker && a.ticker !== 'NONE') mergedMap.set(a.ticker, { ...a });
-        }
-        for (const ca of curated.actions || []) {
-          const existing = mergedMap.get(ca.ticker);
-          if (!existing || existing.action === 'WATCH') {
-            mergedMap.set(ca.ticker, { ...ca });
-          } else if (ca.conviction >= 3) {
-            const caBull = ca.action === 'BUY' || ca.action === 'COVER';
-            const exBull = existing.action === 'BUY' || existing.action === 'COVER';
-            if (caBull !== exBull) {
-              // Prevent AI from inverting a conviction-3 handbook trigger
-              mergedMap.set(ca.ticker, { ...ca });
-            }
-          }
-        }
-        const finalActions = Array.from(mergedMap.values()).slice(0, 3);
+        const aiActions = (result.actions || []).filter((a) => a.ticker && a.ticker !== 'NONE');
 
         sendJson(req, res, 200, {
           ok: true,
           mode: 'AI',
           summary: result.summary || curated.summary,
-          actions: finalActions.length ? finalActions : curated.actions,
+          actions: aiActions.length ? aiActions : curated.actions,
           model,
         });
       } catch (aiErr) {

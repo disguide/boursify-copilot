@@ -1,19 +1,19 @@
-# Boursify AI Co-Pilot (SBG 2026)
+# Boursify Live 20% Cash Calculator, Price & News Terminal (SBG 2026)
 
-A two-part setup for `play.boursify.io` (Simulation `#448`): a zero-CORS local Node proxy (`proxy.mjs`) that sends full simulation context to NVIDIA NIM, plus a scroll-safe, draggable browser overlay (`copilot.js`).
+A pure data & position-sizing overlay for `play.boursify.io` (Simulation `#448`). No AI/script `BUY` or `SELL` opinions—just live prices, instant breaking news, and live share math.
 
-## 2-Step Setup
-1. **Start the local NVIDIA proxy** (once before the simulation):
-   - Double-click [`start-proxy.bat`](./start-proxy.bat) (or run `node proxy.mjs` inside this folder).
-   - It listens on `http://127.0.0.1:8787` with zero noticeable latency overhead (~1ms local loopback).
-2. **Launch the overlay in Brave/Chrome**:
-   - Open `https://play.boursify.io/player/trade` and log in.
-   - Right-click the page → **Inspect** → **Console** → paste [`copilot.js`](./copilot.js) → press **Enter**.
-   - Paste your `nvapi-...` key into the **NVIDIA API Key** box and click **Test**.
-   - *(Brave note)* If Brave Shields blocks `127.0.0.1:8787`, click the **Brave Lion icon** in the address bar and toggle **Shields DOWN** for `play.boursify.io`.
+## What It Shows Live (Every 2.5s)
+1. **Live 20% Cash Share Calculator (All 10 Stocks):**
+   - Automatically calculates the exact share count covering **20% of your current cash** (`Cash % per Trade` is adjustable to any `%`, and **`Round: ON / Exact`** toggles clean round share numbers vs. exact share counts).
+   - If you turn **`Pre-fill: ON`**, clicking **`Fill`** next to any stock populates its ticker and that exact `20%` share count into `/player/trade`.
+2. **Live Price Table:**
+   - Shows every stock's **live price**, **60-second `%` change**, **total `%` change from Start Price**, and your **held shares + unrealized P&L `%`**.
+3. **Live Breaking News Feed (Newest First):**
+   - Auto-refreshes `/past-events` without clicking `Update`, tagging related company tickers (`RAI`, `PAL`, `ALE`, etc.) with zero `BUY`/`SELL` bias.
 
-## Modes & Controls
-- **`Pre-fill: OFF` (Default / Rules-Safe):** Read-only **Order Book** mode—never touches the Boursify trade form.
-- **`Pre-fill: ON`:** Adds a **Pre-fill** button on `BUY`/`SELL` cards to populate the `/player/trade` form for 1-click confirmation.
-- **`Test`:** Checks `GET /health` and runs the real SBG `Northline Infrastructure` negative headline through NVIDIA so you verify `AVOID`/`SELL` behavior right away.
-- **`Re-scan 3`:** Re-analyzes the 3 most recent headlines once NVIDIA is connected.
+## How to Launch
+- **With local server running (`start-proxy.bat` or `start-proxy-curated.bat`):**
+  ```js
+  fetch('http://127.0.0.1:8787/copilot.js').then(r=>r.text()).then(eval)
+  ```
+- **Or paste [`copilot.js`](./copilot.js) directly into your browser Console** (no proxy or API key needed).

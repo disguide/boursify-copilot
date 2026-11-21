@@ -170,23 +170,20 @@ export const analyzeCurated = ({ headline = '', portfolio = {} }) => {
 
   // 1. RAI — Rubicon AI
   if (hasAny(['rubicon', 'julian vance', 'alea-3', 'alea 3', 'legio', 'ravenne', 'artificial intelligence sector', 'secteur de l\'intelligence artificielle'])) {
-    if (hasAny(['short position', 'positions à découvert', 'bubble', 'bulle', 'lock-up', 'blocage', 'former employee', 'anciens employés', 'doubt', 'doute', 'delay', 'retard', 'overvalued'])) {
-      addAction('RAI', 'BEAR', 3, 20, 'Institutional shorting / lock-up / Legio doubts hit Rubicon AI (37x sales)');
-    } else if (posScore >= negScore) {
-      addAction('RAI', 'BULL', 3, 25, 'Rubicon AI / Project Legio / Alea-3 momentum catalyst');
-    } else {
-      addAction('RAI', 'BEAR', 2, 15, 'Negative catalyst on unprofitable Rubicon AI');
+    if (negScore > posScore || hasAny(['short position', 'positions à découvert', 'bubble', 'bulle', 'lock-up', 'blocage', 'former employee', 'anciens employés', 'doubt', 'doute', 'delay', 'retard', 'overvalued'])) {
+      addAction('RAI', 'BEAR', 3, 20, 'Negative catalyst / shorting / Legio doubts hit Rubicon AI (37x sales)');
+    } else if (posScore > negScore) {
+      addAction('RAI', 'BULL', 3, 25, 'Rubicon AI / Project Legio / Alea-3 positive breakthrough');
     }
   }
 
   // 2. PAL — Palissade Capital
   if (hasAny(['palissade', 'miles stern', 'office real estate', 'immobilier de bureau', 'commercial real estate', 'loan default', 'défaut de prêt'])) {
-    // Check if Palissade Research is attacking ANOTHER stock (e.g. RAI)
     if (hasAny(['palissade research']) && hasAny(['rubicon', 'alea', 'legio', 'ai', 'intelligence artificielle'])) {
       addAction('RAI', 'BEAR', 3, 22, 'Bearish Palissade Research report targets Rubicon AI valuation');
     } else if (negScore > posScore) {
       addAction('PAL', 'BEAR', 3, 20, 'Credit/real-estate defaults or margin pressure hit Palissade Capital');
-    } else if (posScore > 0) {
+    } else if (posScore > negScore) {
       addAction('PAL', 'BULL', 2, 18, 'Strong banking spread / asset management inflow for Palissade');
     }
   }
@@ -196,14 +193,14 @@ export const analyzeCurated = ({ headline = '', portfolio = {} }) => {
     if (hasAny(['ht-114', 'ht 114', 'obesity', 'obésité', 'phase 3'])) {
       if (negScore > posScore) {
         addAction('ALE', 'BEAR', 3, 25, 'HT-114 Phase 3 setback leaves Aldren with no fallback after Cardiva');
-      } else {
+      } else if (posScore > negScore) {
         addAction('ALE', 'BULL', 3, 32, 'HT-114 oral obesity pill Phase 3 success replaces Cardiva revenue');
       }
     } else if (hasAny(['cardiva', 'patent', 'brevet', 'generic', 'générique']) && negScore >= posScore) {
       addAction('ALE', 'BEAR', 3, 20, 'Cardiva (38% of sales) April 2030 patent cliff & generic erosion');
     } else if (negScore > posScore) {
       addAction('ALE', 'BEAR', 2, 15, 'Negative pharma/clinical headline for Aldren');
-    } else if (posScore > 0) {
+    } else if (posScore > negScore) {
       addAction('ALE', 'BULL', 2, 20, 'Positive R&D / defensive healthcare catalyst for Aldren');
     }
   }
@@ -212,16 +209,16 @@ export const analyzeCurated = ({ headline = '', portfolio = {} }) => {
   if (hasAny(['taïga', 'taiga', 'luc bergeron', 'aurore', 'abitibi', 'val-d\'or', '55th parallel', '55e parallèle'])) {
     if (negScore > posScore) {
       addAction('TAG', 'BEAR', 3, 20, 'Subsidy, royalty, or Indigenous consultation setback on Aurore project');
-    } else if (posScore > 0) {
+    } else if (posScore > negScore) {
       addAction('TAG', 'BULL', 3, 25, 'Aurore project / critical metals demand catalyst for cheap P/E 9 Taïga');
     }
   }
 
   // 5. HAW — Grayhawk Systems
   if (hasAny(['grayhawk', 'diane kessler', 'bastion'])) {
-    if (hasAny(['human rights', 'droits de la personne', 'ethical', 'éthique', 'protest', 'scandal', 'cancel', 'defect', 'bug', 'panne'])) {
+    if (negScore > posScore || hasAny(['human rights', 'droits de la personne', 'ethical', 'éthique', 'protest', 'scandal', 'cancel', 'defect', 'bug', 'panne'])) {
       addAction('HAW', 'BEAR', 2, 16, 'Military AI ethics backlash or Bastion OS issue hits Grayhawk');
-    } else if (posScore >= negScore) {
+    } else if (posScore > negScore) {
       addAction('HAW', 'BULL', 3, 25, 'Defense contract / Bastion OS demand expands Grayhawk backlog');
     }
   }
