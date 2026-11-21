@@ -1,29 +1,26 @@
 /**
- * Boursify Live Intel Dashboard, 20% Cash Sizer & News Terminal (SBG 2026)
+ * Boursify 20% Total Portfolio Sizer, Price-vs-Average & Raw News Terminal (SBG 2026)
  *
- * Pure data & handbook-intel terminal — zero AI/script BUY or SELL guessing:
- *  1. Portfolio Bar: Live Cash, Invested $, Total Value, Total Return %, and 20% Cash Sizer
- *     (with quick 10% / 20% / 30% presets, Round ON/Exact, and remaining 40%-cap room per stock).
- *  2. Live Quotes + Expandable Handbook Intel: Live Price, 60s %, Total % vs Start, MA50/MA200,
- *     Held Shares & P&L %, 20% Cash Shares, and 1-click expandable company dossier (CEO, products,
- *     ratios, political/macro links from the 18-page SBG 2026 Participant Handbook).
- *  3. Live Breaking News + Articles Feed: Auto-updates /past-events and /articles newest-first,
- *     tags related tickers (even when only a CEO/product/party is named), and displays the
- *     matching handbook fact below the headline with a ticker filter bar.
+ * Pure numbers & raw news — zero handbook clues, zero AI/script BUY/SELL opinions:
+ *  1. 20% of TOTAL PORTFOLIO VALUE share calculator for all 10 stocks live.
+ *  2. Price Movement vs. Average (shows Live Price, Average Price, % Deviation from Average
+ *     so you immediately spot when a stock is down below its average to bet on mean reversion,
+ *     plus 60s % move and Low–High range).
+ *  3. Clean Raw Breaking News feed (newest first, scroll-safe).
  */
 (() => {
   if (window.__BOURSIFY_COPILOT__) {
     window.__BOURSIFY_COPILOT__.destroy();
   }
 
-  const STORAGE_KEY = 'boursify_copilot_cfg_v3';
+  const STORAGE_KEY = 'boursify_copilot_cfg_v4';
   const defaultCfg = {
     simId: '448',
     playerId: '38158',
     pollMs: 2500,
     prefillEnabled: false,
-    allocPct: 20,
-    roundMode: true,
+    allocPct: 20,       // 20% of TOTAL PORTFOLIO VALUE
+    roundMode: true,    // Clean round share numbers for fast typing
     wideMode: false,
     minimized: false,
   };
@@ -56,188 +53,29 @@
   };
   detectIds();
 
-  // Full 18-page SBG 2026 Participant Handbook Intel Dossiers
-  const TICKERS = {
-    RAI: {
-      id: '4224',
-      name: 'Rubicon AI',
-      sector: 'AI / Tech',
-      ceo: 'Julian Vance',
-      hq: 'San Francisco',
-      startPrice: 48.0,
-      pe: 'n.m. (loss)',
-      beta: 'new',
-      de: '0.14',
-      revGrowth: '+180%',
-      netMargin: '-59.4%',
-      intel: 'Flagship Alea-3 (12k clients). Secret AGI Project Legio + Ravenne-2 data centre (Fall 2030). Unprofitable (-$1.9B on $3.2B rev), $9B IPO cash (4-5 yrs runway), ~37x sales. Dependent on Taiwan chips. Palissade (PAL) owns 6% — 6-month IPO lock-up expires mid-July 2030.',
-      keywords: ['rubicon', 'julian vance', 'alea-3', 'alea 3', 'legio', 'ravenne', 'artificial intelligence', 'intelligence artificielle', 'agi', 'semiconductor', 'taiwan'],
-    },
-    PAL: {
-      id: '4225',
-      name: 'Palissade Capital',
-      sector: 'Bank & Asset Mgmt',
-      ceo: 'Miles Stern',
-      hq: 'New York',
-      startPrice: 85.0,
-      pe: '12.0',
-      beta: '0.9',
-      de: '2.40 (bank)',
-      revGrowth: '+3%',
-      netMargin: '22.4%',
-      intel: 'Commercial & office real estate lender + $1,400B AUM + Palissade Research (reports move markets). Div yield 3.8%. High 4.25% rates boost spread; rate cuts squeeze margin; recession increases office real-estate loan defaults. Owns 6% of RAI (lock-up ends mid-July 2030).',
-      keywords: ['palissade', 'miles stern', 'palissade research', 'commercial real estate', 'office real estate', 'immobilier de bureau', 'bank of canada', 'banque du canada', 'federal reserve', 'policy rate', 'taux directeur'],
-    },
-    ALE: {
-      id: '4226',
-      name: 'Aldren Pharmaceuticals',
-      sector: 'Pharma',
-      ceo: 'Dr. Helen Marsh',
-      hq: 'Cambridge, MA',
-      startPrice: 112.0,
-      pe: '16.0',
-      beta: '0.6',
-      de: '0.63',
-      revGrowth: '+2%',
-      netMargin: '18.6%',
-      intel: 'Defensive healthcare (div 3.0%, $11B cash, 18% R&D). Cardiva (heart failure = 38% of revenue) patent expires April 2030 (sales could halve on generics). Betting everything on HT-114 (once-daily oral obesity pill) — Phase 3 results due end of summer 2030 (no fallback if it fails).',
-      keywords: ['aldren', 'helen marsh', 'cardiva', 'ht-114', 'ht 114', 'obesity', 'obésité', 'heart failure', 'insuffisance cardiaque', 'patent', 'brevet', 'generic', 'générique', 'phase 3', 'pharma'],
-    },
-    TAG: {
-      id: '4227',
-      name: 'Ressources Taïga',
-      sector: 'Critical Metals',
-      ceo: 'Luc Bergeron',
-      hq: 'Val-d\'Or, QC',
-      startPrice: 31.0,
-      pe: '9.0',
-      beta: '1.4',
-      de: '0.59',
-      revGrowth: '+22%',
-      netMargin: '15.0%',
-      intel: 'QC largest producer of nickel, cobalt, lithium, graphite (4 mines). Cheap P/E 9. Flagship Aurore deposit north of 55th parallel ($2.8B cost, $600M promised subsidy, 240-km road, Indigenous consultation). CEO backs Alliance prospérité (Ouellet). Hurt if Québec Ensemble (Fortin) reviews subsidies/raises royalties. In talks with EU buyers.',
-      keywords: ['taïga', 'taiga', 'luc bergeron', 'aurore', 'abitibi', 'val-d\'or', '55th parallel', '55e parallèle', 'critical metals', 'métaux critiques', 'critical minerals', 'nickel', 'cobalt', 'lithium', 'graphite', 'royalties', 'redevances', 'alliance prospérité', 'ouellet'],
-    },
-    HAW: {
-      id: '4228',
-      name: 'Grayhawk Systems',
-      sector: 'Defence & Tech',
-      ceo: 'Gen. Diane Kessler',
-      hq: 'Arlington, VA',
-      startPrice: 145.0,
-      pe: '22.3',
-      beta: '0.7',
-      de: '0.75',
-      revGrowth: '+7%',
-      netMargin: '9.3%',
-      intel: 'Radar, surveillance drones, air defence & Bastion OS real-time command software. 80% US govt, 20% allies (Canada, Japan, EU). $95B backlog (>3 yrs revenue, recession/rate-proof). Tailwinds: Indo-Pacific/Taiwan tensions, NATO 3.5% GDP defence target, Ottawa military base modernization. Risk: AI ethics backlash.',
-      keywords: ['grayhawk', 'diane kessler', 'bastion', 'nato', 'otan', '3.5% of gdp', 'defence', 'defense', 'défense', 'military', 'militaire', 'drone', 'radar', 'indo-pacific', 'taiwan'],
-    },
-    LIA: {
-      id: '4229',
-      name: 'Hydrélia',
-      sector: 'Clean Energy / H2',
-      ceo: 'Sophie Lachance',
-      hq: 'Bécancour, QC',
-      startPrice: 24.0,
-      pe: 'n.m. (loss)',
-      beta: '1.9',
-      de: '1.22',
-      revGrowth: '+95%',
-      netMargin: '-25.0%',
-      intel: 'Green hydrogen electrolyzers & grid/industrial battery storage. Fast growth (+95% to $180M) but unprofitable (-$45M). Building $1.2B Bécancour plant; only $250M cash & D/E 1.22 — needs new financing within 18 months. CEO backs Québec Ensemble (Fortin: $2B green H2 fund + cheap hydro). Eyeing EU & data-centre storage.',
-      keywords: ['hydrélia', 'hydrelia', 'sophie lachance', 'bécancour', 'becancour', 'green hydrogen', 'hydrogène vert', 'hydrogen', 'hydrogène', 'electrolyzer', 'électrolyseur', 'battery storage', 'québec ensemble', 'camille fortin'],
-    },
-    NOR: {
-      id: '4230',
-      name: 'Northline Infrastructure',
-      sector: 'Engineering & Const.',
-      ceo: 'Catherine Doyle',
-      hq: 'Toronto, ON',
-      startPrice: 52.0,
-      pe: '15.0',
-      beta: '1.2',
-      de: '1.50',
-      revGrowth: '+6%',
-      netMargin: '3.7%',
-      intel: '35% transport, 25% energy, 20% buildings/housing, 10% north/defence, 10% intl (Europe). $26B backlog including $1.1B Far North Highway (connects TAG Aurore). Thin 3.7% margin with fixed-price contracts (cost overruns hurt!) and D/E 1.50 (sensitive to interest rates & real-estate client defaults).',
-      keywords: ['northline', 'catherine doyle', 'far north highway', 'route du grand nord', 'fixed-price', 'prix fixe', 'infrastructure', 'construction', 'real estate developer', 'promoteur immobilier', 'housing', 'rail'],
-    },
-    CHA: {
-      id: '4231',
-      name: 'Épiceries Champlain',
-      sector: 'Food Retail',
-      ceo: 'Isabelle Gagnon',
-      hq: 'Quebec City, QC',
-      startPrice: 68.5,
-      pe: '18.0',
-      beta: '0.5',
-      de: '0.85',
-      revGrowth: '+4%',
-      netMargin: '4.0%',
-      intel: 'QC largest grocer (28% share, 410 stores: Champlain, Express, Marché Fleuve discount). Defensive Beta 0.5, ROE 16.5%, 12 yrs dividend hikes. Testing Comptoir Champlain ready-meals & open to acquiring a restaurant chain (PIN). Risk: Québec Ensemble promises public inquiry into grocers’ margins / price regulation.',
-      keywords: ['champlain', 'isabelle gagnon', 'marché fleuve', 'marche fleuve', 'comptoir champlain', 'limoilou', 'grocery', 'grocers', 'épicerie', 'épicier', 'supermarket', 'food retail'],
-    },
-    PIN: {
-      id: '4232',
-      name: 'Les Restaurants Papineau',
-      sector: 'Restaurants',
-      ceo: 'Olivier Desrosiers',
-      hq: 'Montreal, QC',
-      startPrice: 18.0,
-      pe: '30.0',
-      beta: '1.6',
-      de: '1.86',
-      revGrowth: '+14%',
-      netMargin: '2.8%',
-      intel: '260 QC family bistros expanding to Ontario (30 by 2032). Expensive P/E 30, thin 2.8% margin, 34% labour cost (minimum wage sensitive), cyclic in recession. Heavy debt: D/E 1.86, debt/operating income at 3.6x vs 4.0x credit covenant limit! Considering frozen meals in grocery stores / potential CHA acquisition target.',
-      keywords: ['papineau', 'olivier desrosiers', 'poutine', 'minimum wage', 'salaire minimum', 'restaurant', 'restauration', 'frozen meal', 'plats surgelés', 'covenant'],
-    },
-    HOL: {
-      id: '4233',
-      name: 'Hollis & Rowe',
-      sector: 'Apparel & Footwear',
-      ceo: 'Grant Hollis',
-      hq: 'Portland, OR',
-      startPrice: 82.0,
-      pe: '17.8',
-      beta: '1.1',
-      de: '0.55',
-      revGrowth: '+5%',
-      netMargin: '8.8%',
-      intel: '2,100 outdoor apparel stores ("Made to Last", ROE 24.2%, $3.8B cash). Sales: 55% US, 25% EU, 20% Asia. 70% made in Asia (Bangladesh, Vietnam, Taiwan). Risks: NGO labour accusations, US tariffs on Asian imports, Fall 2030 EU supply-chain directive, consumer recession. Moving part of production to Mexico & testing AI inventory (-30% unsold stock).',
-      keywords: ['hollis', 'grant hollis', 'made to last', 'portland', 'apparel', 'footwear', 'clothing', 'vêtements', 'tariff', 'tarif', 'bangladesh', 'vietnam', 'mexico', 'mexique', 'unsold stock', 'working conditions'],
-    },
+  const START_PRICES = {
+    RAI: 48.0,
+    PAL: 85.0,
+    ALE: 112.0,
+    TAG: 31.0,
+    HAW: 145.0,
+    LIA: 24.0,
+    NOR: 52.0,
+    CHA: 68.5,
+    PIN: 18.0,
+    HOL: 82.0,
   };
-
-  // Context clues for anonymous news items
-  const CLUE_NOTES = [
-    { match: ['québec ensemble', 'quebec ensemble', 'camille fortin'], note: 'QC Election: Québec Ensemble backs LIA ($2B H2 fund), threatens TAG ($600M subsidy/royalties) & CHA (grocer margin inquiry).' },
-    { match: ['alliance prospérité', 'alliance prosperite', 'jean-philippe ouellet', 'ouellet'], note: 'QC Election: Alliance prospérité backs TAG (Aurore mining) & NOR (Far North Highway), shelves LIA green H2 fund.' },
-    { match: ['cardiva'], note: 'Cardiva = ALE heart-failure drug (38% of revenue; patent expires April 2030).' },
-    { match: ['ht-114', 'ht 114', 'obesity', 'obésité'], note: 'HT-114 = ALE once-daily oral obesity pill (Phase 3 results due late summer 2030; no fallback if it fails).' },
-    { match: ['legio', 'ravenne', 'alea-3', 'julian vance'], note: 'Rubicon AI (RAI): Alea-3 model, Project Legio AGI & Ravenne-2 data centre (Fall 2030).' },
-    { match: ['lock-up', 'blocage', 'miles stern', 'palissade research'], note: 'Palissade (PAL) holds 6% of RAI (lock-up expires mid-July 2030); Palissade Research reports move markets.' },
-    { match: ['aurore', 'luc bergeron', '55th parallel', '55e parallèle'], note: 'Aurore = TAG $2.8B lithium/nickel project ($600M subsidy, 240-km road via NOR).' },
-    { match: ['bastion', 'diane kessler'], note: 'Bastion OS = Grayhawk (HAW) military command software ($95B backlog).' },
-    { match: ['bécancour', 'becancour', 'sophie lachance'], note: 'Hydrélia (LIA) $1.2B green hydrogen plant in Bécancour (needs financing within 18m).' },
-    { match: ['far north highway', 'route du grand nord', 'catherine doyle'], note: 'Northline (NOR) $1.1B Far North Highway contract (thin 3.7% margin, fixed-price risk).' },
-    { match: ['marché fleuve', 'comptoir champlain', 'isabelle gagnon'], note: 'Champlain (CHA): Marché Fleuve discount banner & Comptoir Champlain ready-meals (eyeing restaurant M&A).' },
-    { match: ['olivier desrosiers', 'minimum wage', 'salaire minimum'], note: 'Papineau (PIN): 34% labour cost, P/E 30, debt at 3.6x vs 4.0x credit covenant.' },
-    { match: ['grant hollis', 'made to last', 'bangladesh', 'vietnam'], note: 'Hollis & Rowe (HOL): 70% made in Asia (Bangladesh/Vietnam/Taiwan); shifting to Mexico + AI inventory.' },
-  ];
 
   const state = {
     products: [],
-    priceHistory: {},
+    priceHistory: {},      // { sym: [{ t, p }] } last 60s
+    sessionStats: {},      // { sym: { sum, count, min, max } }
     cash: 1000000,
     totalValue: 1000000,
-    holdings: {},          // { ticker: { qty, avgPrice } }
+    holdings: {},          // { sym: { qty, avgPrice } }
     seenEvents: new Set(),
-    newsList: [],          // [{ id, timeLabel, tags, clue, headline, isArticle }]
+    newsList: [],          // [{ id, timeLabel, headline }]
     newsVersion: 0,
-    expandedSym: null,     // Ticker whose handbook dossier is expanded
-    newsFilter: 'ALL',     // 'ALL' or ticker symbol
     lastPollAt: null,
     lastError: null,
     statusMsg: '',
@@ -245,7 +83,6 @@
   };
 
   let lastRenderedNewsVersion = -1;
-  let lastRenderedFilter = 'ALL';
 
   const esc = (s) =>
     String(s ?? '')
@@ -266,6 +103,27 @@
     return baseP > 0 ? ((currentPrice - baseP) / baseP) * 100 : 0;
   };
 
+  // Compute reference Average Price (blends Boursify MA50 / Start Price with live session mean)
+  const getAverageStats = (p) => {
+    const sym = p.short_name || p.ticker || '?';
+    const price = Number(p.current_price || 0);
+    const m = p.marketable || {};
+    const startP = Number(m.starting_price || START_PRICES[sym] || price);
+    const ma50 = Number(m.moving_average_50_days || 0);
+    const st = state.sessionStats[sym];
+    const sessionAvg = st && st.count > 0 ? st.sum / st.count : price;
+
+    // Reference average: use MA50 if available & valid, blended with session average / start price
+    const refAvg = ma50 > 0 ? (ma50 + sessionAvg) / 2 : (startP + sessionAvg) / 2;
+    const vsAvgPct = refAvg > 0 ? ((price - refAvg) / refAvg) * 100 : 0;
+    const vsStartPct = startP > 0 ? ((price - startP) / startP) * 100 : 0;
+
+    const hi = Math.max(price, Number(m.highest_price || 0), st?.max || price);
+    const lo = Math.min(price, Number(m.lowest_price || price) || price, st?.min || price);
+
+    return { refAvg, vsAvgPct, vsStartPct, hi, lo };
+  };
+
   const roundShares = (rawQty) => {
     const n = Math.floor(Number(rawQty) || 0);
     if (!cfg.roundMode) return Math.max(0, n);
@@ -275,35 +133,11 @@
     return Math.max(0, n);
   };
 
-  // Calculate shares for X% of current cash (plus max shares allowed under 40% single-stock cap)
-  const calcCashPctShares = (sym, price) => {
-    if (!price || price <= 0 || state.cash <= 50) return { pctShares: 0, maxCapShares: 0 };
-    const targetCash = state.cash * (Number(cfg.allocPct || 20) / 100);
-    const maxSpendable = Math.max(0, (state.cash - 55) / 1.005);
-    const budget = Math.min(targetCash, maxSpendable);
-    const pctShares = roundShares(budget / price);
-
-    const heldQty = Math.abs(Number(state.holdings[sym]?.qty || 0));
-    const maxTotalSharesFor40Pct = Math.floor((state.totalValue * 0.395) / price);
-    const maxCapShares = Math.max(0, maxTotalSharesFor40Pct - heldQty);
-    return { pctShares, maxCapShares };
-  };
-
-  const analyzeNewsIntel = (headline) => {
-    const t = String(headline || '').toLowerCase();
-    const tags = [];
-    for (const [sym, info] of Object.entries(TICKERS)) {
-      if (info.keywords.some((kw) => t.includes(kw))) {
-        tags.push(sym);
-      }
-    }
-    const clues = [];
-    for (const c of CLUE_NOTES) {
-      if (c.match.some((m) => t.includes(m))) {
-        clues.push(c.note);
-      }
-    }
-    return { tags, clue: clues.join(' · ') };
+  // Calculate shares for X% of TOTAL PORTFOLIO VALUE
+  const calcPortfolioPctShares = (price) => {
+    if (!price || price <= 0 || state.totalValue <= 0) return 0;
+    const targetDollars = state.totalValue * (Number(cfg.allocPct || 20) / 100);
+    return roundShares(targetDollars / price);
   };
 
   const setNativeValue = (el, val) => {
@@ -358,7 +192,7 @@
   const root = document.createElement('div');
   root.id = 'boursify-copilot-root';
   const applyWidth = () => {
-    root.style.width = cfg.wideMode ? '620px' : '450px';
+    root.style.width = cfg.wideMode ? '620px' : '460px';
   };
   root.style.cssText = [
     'position:fixed', 'bottom:14px', 'right:14px', 'z-index:999999',
@@ -369,19 +203,11 @@
   ].join(';');
   applyWidth();
 
-  const filterSymbols = ['ALL', ...Object.keys(TICKERS)];
-  const filterPillsHtml = filterSymbols
-    .map(
-      (sym) =>
-        `<button data-filter-sym="${sym}" style="background:#1e293b;color:#cbd5e1;border:1px solid #334155;border-radius:4px;padding:2px 5px;cursor:pointer;font-size:10px;font-weight:600;">${sym}</button>`
-    )
-    .join('');
-
   root.innerHTML = `
     <div id="bc-drag-handle" style="display:flex;justify-content:space-between;align-items:center;padding:9px 12px;background:#1e293b;border-bottom:1px solid #334155;cursor:move;user-select:none;">
       <div style="min-width:0;padding-right:8px;">
-        <div style="font-weight:700;font-size:13px;">Boursify Intel & 20% Cash Sizer <span style="color:#38bdf8">#${esc(cfg.simId)}</span> <span id="bc-status-msg" style="font-size:10px;color:#4ade80;"></span></div>
-        <div id="bc-cash-line" style="color:#94a3b8;font-size:10px;">Cash: $1,000,000 · Total: $1,000,000 (+0.0%)</div>
+        <div style="font-weight:700;font-size:13px;">Boursify Portfolio Sizer & Price Tracker <span style="color:#38bdf8">#${esc(cfg.simId)}</span> <span id="bc-status-msg" style="font-size:10px;color:#4ade80;"></span></div>
+        <div id="bc-cash-line" style="color:#94a3b8;font-size:10px;">Total: $1,000,000 · Cash: $1,000,000</div>
       </div>
       <div style="display:flex;gap:5px;align-items:center;flex-shrink:0;">
         <button id="bc-toggle-wide" style="background:#334155;color:#fff;border:none;border-radius:6px;padding:4px 7px;cursor:pointer;font-size:10px;">Wide</button>
@@ -392,27 +218,27 @@
     <div id="bc-body" style="padding:9px 12px;display:flex;flex-direction:column;gap:7px;overflow:hidden;flex:1;">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;background:#1e293b;padding:5px 8px;border-radius:6px;flex-wrap:wrap;">
         <div style="display:flex;align-items:center;gap:4px;">
-          <span style="font-size:11px;color:#e2e8f0;font-weight:600;">Cash %:</span>
+          <span style="font-size:11px;color:#e2e8f0;font-weight:600;">Portfolio %:</span>
           <input id="bc-alloc" type="number" min="1" max="100" value="${cfg.allocPct}" style="width:44px;background:#0f172a;color:#38bdf8;font-weight:700;border:1px solid #475569;border-radius:4px;padding:2px 4px;">
           <button data-pct="10" style="background:#334155;color:#cbd5e1;border:none;border-radius:3px;padding:2px 5px;cursor:pointer;font-size:10px;">10%</button>
           <button data-pct="20" style="background:#334155;color:#cbd5e1;border:none;border-radius:3px;padding:2px 5px;cursor:pointer;font-size:10px;">20%</button>
           <button data-pct="30" style="background:#334155;color:#cbd5e1;border:none;border-radius:3px;padding:2px 5px;cursor:pointer;font-size:10px;">30%</button>
+          <button data-pct="40" style="background:#334155;color:#cbd5e1;border:none;border-radius:3px;padding:2px 5px;cursor:pointer;font-size:10px;">40%</button>
         </div>
         <span id="bc-budget-pill" style="color:#38bdf8;font-weight:700;font-size:11px;">= $200,000</span>
         <button id="bc-toggle-round" style="background:#2563eb;color:#e2e8f0;border:none;border-radius:4px;padding:2px 7px;cursor:pointer;font-size:10px;">Round: ON</button>
       </div>
-      <div style="display:grid;grid-template-columns:1.3fr 1.25fr 1.1fr;font-weight:700;font-size:10px;color:#94a3b8;padding:0 2px;">
-        <span>STOCK (CLICK FOR INTEL)</span>
-        <span style="text-align:right;">PRICE · 60s · VS START</span>
-        <span id="bc-col-sh-hdr" style="text-align:right;">${cfg.allocPct}% CASH SHARES</span>
+      <div style="display:grid;grid-template-columns:1.05fr 1.55fr 0.95fr;font-weight:700;font-size:10px;color:#94a3b8;padding:0 2px;">
+        <span>STOCK (HELD)</span>
+        <span style="text-align:right;">PRICE · VS AVG · 60s</span>
+        <span id="bc-col-sh-hdr" style="text-align:right;">${cfg.allocPct}% PORT SHARES</span>
       </div>
-      <div id="bc-quotes-list" style="overflow-y:auto;max-height:260px;padding-right:2px;"></div>
+      <div id="bc-quotes-list" style="overflow-y:auto;max-height:270px;padding-right:2px;"></div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-top:2px;">
-        <span style="font-weight:700;font-size:11px;color:#94a3b8;">LIVE NEWS & HANDBOOK CLUES</span>
+        <span style="font-weight:700;font-size:11px;color:#94a3b8;">LIVE NEWS (NEWEST FIRST)</span>
         <span id="bc-news-count" style="font-size:10px;color:#64748b;">0 items</span>
       </div>
-      <div id="bc-filter-bar" style="display:flex;gap:3px;flex-wrap:wrap;">${filterPillsHtml}</div>
-      <div id="bc-news-list" style="overflow-y:auto;max-height:240px;padding-right:2px;"></div>
+      <div id="bc-news-list" style="overflow-y:auto;max-height:220px;padding-right:2px;"></div>
     </div>
   `;
   document.body.appendChild(root);
@@ -429,24 +255,23 @@
   const elColShHdr = root.querySelector('#bc-col-sh-hdr');
   const elQuotesList = root.querySelector('#bc-quotes-list');
   const elNewsCount = root.querySelector('#bc-news-count');
-  const elFilterBar = root.querySelector('#bc-filter-bar');
   const elNewsList = root.querySelector('#bc-news-list');
   const elHandle = root.querySelector('#bc-drag-handle');
 
   const renderHeader = () => {
     const pct = Number(cfg.allocPct || 20);
-    const targetDollars = Math.round(state.cash * (pct / 100));
+    const targetDollars = Math.round(state.totalValue * (pct / 100));
     const retPct = ((state.totalValue - 1000000) / 1000000) * 100;
     const retCol = retPct >= 0 ? '#4ade80' : '#f87171';
 
     elStatus.textContent = state.statusMsg ? `(${state.statusMsg})` : '';
-    elCash.innerHTML = `Cash: <b>$${Math.round(state.cash).toLocaleString()}</b> · Total: <b>$${Math.round(state.totalValue).toLocaleString()}</b> <span style="color:${retCol}">(${retPct >= 0 ? '+' : ''}${retPct.toFixed(2)}%)</span> · ${
+    elCash.innerHTML = `Total: <b>$${Math.round(state.totalValue).toLocaleString()}</b> <span style="color:${retCol}">(${retPct >= 0 ? '+' : ''}${retPct.toFixed(2)}%)</span> · Cash: <b>$${Math.round(state.cash).toLocaleString()}</b> · ${
       state.lastError
         ? `<span style="color:#f87171">${esc(state.lastError)}</span>`
         : esc(state.lastPollAt || '...')
     }`;
     elBudgetPill.textContent = `= $${targetDollars.toLocaleString()}`;
-    elColShHdr.textContent = `${pct}% CASH SHARES`;
+    elColShHdr.textContent = `${pct}% PORT SHARES`;
     elRoundBtn.textContent = `Round: ${cfg.roundMode ? 'ON' : 'Exact'}`;
     elRoundBtn.style.background = cfg.roundMode ? '#2563eb' : '#334155';
     elWideBtn.style.background = cfg.wideMode ? '#2563eb' : '#334155';
@@ -455,12 +280,6 @@
     elPrefillBtn.style.background = cfg.prefillEnabled ? '#2563eb' : '#334155';
     elMinBtn.textContent = cfg.minimized ? '+' : '−';
     elBody.style.display = cfg.minimized ? 'none' : 'flex';
-
-    elFilterBar.querySelectorAll('[data-filter-sym]').forEach((btn) => {
-      const active = btn.getAttribute('data-filter-sym') === state.newsFilter;
-      btn.style.background = active ? '#2563eb' : '#1e293b';
-      btn.style.color = active ? '#fff' : '#cbd5e1';
-    });
   };
 
   const renderQuotes = () => {
@@ -471,14 +290,20 @@
     elQuotesList.innerHTML = state.products
       .map((p) => {
         const sym = p.short_name || p.ticker || '?';
-        const info = TICKERS[sym] || {};
-        const m = p.marketable || {};
         const price = Number(p.current_price || 0);
-        const startP = Number(m.starting_price || info.startPrice || price);
         const chg60 = getChg60s(sym, price);
-        const chgTot = startP > 0 ? ((price - startP) / startP) * 100 : 0;
+        const { refAvg, vsAvgPct, hi, lo } = getAverageStats(p);
+
         const chg60Col = chg60 > 0.05 ? '#4ade80' : chg60 < -0.05 ? '#f87171' : '#94a3b8';
-        const chgTotCol = chgTot > 0.1 ? '#4ade80' : chgTot < -0.1 ? '#f87171' : '#94a3b8';
+        // Highlight stocks trading below their average in bright green (mean-reversion dip opportunity)
+        const isDip = vsAvgPct <= -2.0;
+        const isHigh = vsAvgPct >= 2.0;
+        const vsAvgCol = isDip ? '#4ade80' : isHigh ? '#fb923c' : '#94a3b8';
+        const vsAvgBadge = isDip
+          ? `<span style="background:#14532d;color:#4ade80;padding:1px 4px;border-radius:3px;font-weight:700;font-size:10px;">▼ ${vsAvgPct.toFixed(1)}% vs Avg</span>`
+          : isHigh
+          ? `<span style="background:#7c2d12;color:#fdba74;padding:1px 4px;border-radius:3px;font-weight:700;font-size:10px;">▲ +${vsAvgPct.toFixed(1)}% vs Avg</span>`
+          : `<span style="color:${vsAvgCol};font-size:10px;">${vsAvgPct >= 0 ? '+' : ''}${vsAvgPct.toFixed(1)}% vs Avg</span>`;
 
         const held = state.holdings[sym];
         const qty = held?.qty || 0;
@@ -491,7 +316,7 @@
           heldTag = ` <span style="color:#38bdf8;font-weight:700;">(${qty})</span> <span style="color:${pnlCol};font-size:10px;">${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}%</span>`;
         }
 
-        const { pctShares, maxCapShares } = calcCashPctShares(sym, price);
+        const pctShares = calcPortfolioPctShares(price);
         const fillBtns = cfg.prefillEnabled
           ? `<button data-fill-sym="${esc(sym)}" data-fill-id="${esc(p.id)}" data-fill-qty="${pctShares}" style="background:#2563eb;color:#fff;border:none;border-radius:3px;padding:1px 5px;margin-left:4px;cursor:pointer;font-size:10px;font-weight:600;">Fill</button>${
               qty !== 0
@@ -500,103 +325,53 @@
             }`
           : '';
 
-        const isExpanded = state.expandedSym === sym;
-        const ma50 = m.moving_average_50_days ? `$${Number(m.moving_average_50_days).toFixed(2)}` : 'n/a';
-        const ma200 = m.moving_average_200_days ? `$${Number(m.moving_average_200_days).toFixed(2)}` : 'n/a';
-        const hi = m.highest_price ? `$${Number(m.highest_price).toFixed(2)}` : 'n/a';
-        const lo = m.lowest_price ? `$${Number(m.lowest_price).toFixed(2)}` : 'n/a';
-
-        const detailHtml = isExpanded
-          ? `<div style="background:#1e293b;border-radius:6px;padding:7px 9px;margin:3px 0 5px;font-size:11px;border-left:3px solid #38bdf8;">
-              <div style="display:flex;justify-content:space-between;color:#94a3b8;font-size:10px;margin-bottom:3px;">
-                <span><b>${esc(info.name || sym)}</b> · ${esc(info.sector || '')} · CEO: <b>${esc(info.ceo || '?')}</b></span>
-                <span>40%-Cap Room: <b style="color:#e2e8f0">${maxCapShares.toLocaleString()} sh</b></span>
-              </div>
-              <div style="color:#cbd5e1;font-size:10px;margin-bottom:4px;">
-                Start: <b>$${startP.toFixed(2)}</b> · P/E: <b>${esc(info.pe || '?')}</b> · Beta: <b>${esc(info.beta || '?')}</b> · D/E: <b>${esc(info.de || '?')}</b> · Rev: <b>${esc(info.revGrowth || '?')}</b> · Margin: <b>${esc(info.netMargin || '?')}</b> · MA50: <b>${ma50}</b> · MA200: <b>${ma200}</b> · Range: <b>${lo}–${hi}</b>
-              </div>
-              <div style="color:#f1f5f9;line-height:1.35;">${esc(info.intel || '')}</div>
-            </div>`
-          : '';
-
-        return `<div style="border-bottom:1px solid #1e293b;">
-          <div data-expand-sym="${esc(sym)}" style="display:grid;grid-template-columns:1.3fr 1.25fr 1.1fr;align-items:center;padding:4px 2px;cursor:pointer;">
-            <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
-              <span style="color:#64748b;font-size:10px;">${isExpanded ? '▼' : '▶'}</span> <b>${esc(sym)}</b> <span style="color:#64748b;font-size:10px;">${esc(info.sector || '')}</span>${heldTag}
-            </span>
-            <span style="text-align:right;font-variant-numeric:tabular-nums;">
-              <b>$${price.toFixed(2)}</b>
-              <span style="color:${chg60Col};font-size:10px;">${chg60 >= 0 ? '+' : ''}${chg60.toFixed(1)}%</span>
-              <span style="color:${chgTotCol};font-size:10px;">(${chgTot >= 0 ? '+' : ''}${chgTot.toFixed(1)}%)</span>
-            </span>
-            <span style="text-align:right;font-variant-numeric:tabular-nums;">
-              <b style="color:#38bdf8;font-size:12px;">${pctShares.toLocaleString()} sh</b>${fillBtns}
-            </span>
+        return `<div style="display:grid;grid-template-columns:1.05fr 1.55fr 0.95fr;align-items:center;padding:5px 2px;border-bottom:1px solid #1e293b;">
+          <div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+            <b>${esc(sym)}</b>${heldTag}
+            <div style="color:#64748b;font-size:9px;">Avg $${refAvg.toFixed(2)} · Lo $${lo.toFixed(1)} / Hi $${hi.toFixed(1)}</div>
           </div>
-          ${detailHtml}
+          <div style="text-align:right;font-variant-numeric:tabular-nums;">
+            <b>$${price.toFixed(2)}</b> ${vsAvgBadge}
+            <div style="color:${chg60Col};font-size:10px;">60s: ${chg60 >= 0 ? '+' : ''}${chg60.toFixed(2)}%</div>
+          </div>
+          <div style="text-align:right;font-variant-numeric:tabular-nums;">
+            <b style="color:#38bdf8;font-size:12px;">${pctShares.toLocaleString()} sh</b>${fillBtns}
+          </div>
         </div>`;
       })
       .join('');
   };
 
   const renderNews = () => {
-    if (
-      lastRenderedNewsVersion === state.newsVersion &&
-      lastRenderedFilter === state.newsFilter
-    ) {
-      return;
-    }
+    if (lastRenderedNewsVersion === state.newsVersion) return;
 
     const prevScrollTop = elNewsList.scrollTop;
     const prevScrollHeight = elNewsList.scrollHeight;
 
-    const filtered =
-      state.newsFilter === 'ALL'
-        ? state.newsList
-        : state.newsList.filter((n) => n.tags.includes(state.newsFilter));
+    elNewsCount.textContent = `${state.newsList.length} items`;
 
-    elNewsCount.textContent = `${filtered.length} / ${state.newsList.length} items`;
-
-    if (!filtered.length) {
-      elNewsList.innerHTML = '<div style="color:#64748b;padding:6px 0;">No news matching filter...</div>';
+    if (!state.newsList.length) {
+      elNewsList.innerHTML = '<div style="color:#64748b;padding:6px 0;">Waiting for news...</div>';
     } else {
-      elNewsList.innerHTML = filtered
+      elNewsList.innerHTML = state.newsList
         .slice(0, 45)
-        .map((n) => {
-          const tagsHtml = n.tags.length
-            ? n.tags
-                .map(
-                  (sym) =>
-                    `<span style="background:#1d4ed8;color:#fff;padding:1px 5px;border-radius:4px;font-weight:700;font-size:10px;margin-right:4px;">${esc(sym)}</span>`
-                )
-                .join('')
-            : `<span style="background:#334155;color:#cbd5e1;padding:1px 5px;border-radius:4px;font-size:10px;margin-right:4px;">MACRO</span>`;
-          const artTag = n.isArticle
-            ? `<span style="background:#7c3aed;color:#fff;padding:1px 5px;border-radius:4px;font-weight:700;font-size:10px;margin-right:4px;">ARTICLE</span>`
-            : '';
-          const clueHtml = n.clue
-            ? `<div style="color:#38bdf8;font-size:10px;margin-top:3px;padding-top:3px;border-top:1px dashed #334155;"><b>Handbook Intel:</b> ${esc(n.clue)}</div>`
-            : '';
-
-          return `<div style="background:#1e293b;border-radius:8px;padding:7px 9px;margin-bottom:6px;border-left:3px solid ${n.tags.length ? '#38bdf8' : '#64748b'};">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px;">
-              <div>${artTag}${tagsHtml}</div>
+        .map(
+          (n) => `<div style="background:#1e293b;border-radius:8px;padding:7px 9px;margin-bottom:6px;border-left:3px solid #38bdf8;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px;">
               <span style="color:#94a3b8;font-size:10px;">${esc(n.timeLabel)}</span>
             </div>
             <div style="color:#f1f5f9;font-size:11px;line-height:1.35;">${esc(n.headline)}</div>
-            ${clueHtml}
-          </div>`;
-        })
+          </div>`
+        )
         .join('');
     }
 
-    if (prevScrollTop > 15 && lastRenderedFilter === state.newsFilter) {
+    if (prevScrollTop > 15) {
       const delta = elNewsList.scrollHeight - prevScrollHeight;
       elNewsList.scrollTop = Math.max(0, prevScrollTop + delta);
     }
 
     lastRenderedNewsVersion = state.newsVersion;
-    lastRenderedFilter = state.newsFilter;
   };
 
   const render = () => {
@@ -649,29 +424,12 @@
 
   elQuotesList.addEventListener('click', (e) => {
     const fillBtn = e.target.closest('[data-fill-sym]');
-    if (fillBtn) {
-      e.stopPropagation();
-      prefillTradeForm({
-        productId: fillBtn.getAttribute('data-fill-id'),
-        ticker: fillBtn.getAttribute('data-fill-sym'),
-        qty: Number(fillBtn.getAttribute('data-fill-qty') || 0),
-      });
-      return;
-    }
-    const row = e.target.closest('[data-expand-sym]');
-    if (row) {
-      const sym = row.getAttribute('data-expand-sym');
-      state.expandedSym = state.expandedSym === sym ? null : sym;
-      renderQuotes();
-    }
-  });
-
-  elFilterBar.addEventListener('click', (e) => {
-    const btn = e.target.closest('[data-filter-sym]');
-    if (!btn) return;
-    state.newsFilter = btn.getAttribute('data-filter-sym') || 'ALL';
-    renderHeader();
-    renderNews();
+    if (!fillBtn) return;
+    prefillTradeForm({
+      productId: fillBtn.getAttribute('data-fill-id'),
+      ticker: fillBtn.getAttribute('data-fill-sym'),
+      qty: Number(fillBtn.getAttribute('data-fill-qty') || 0),
+    });
   });
 
   // --- Draggable Header ---
@@ -726,9 +484,26 @@
         const sym = p.short_name || p.ticker;
         const price = Number(p.current_price || 0);
         if (!sym || !price) continue;
+
         const arr = state.priceHistory[sym] || [];
         arr.push({ t: now, p: price });
         state.priceHistory[sym] = arr.filter((x) => now - x.t <= 60000);
+
+        const prevSt = state.sessionStats[sym];
+        if (!prevSt) {
+          const startP = Number(p.marketable?.starting_price || START_PRICES[sym] || price);
+          state.sessionStats[sym] = {
+            sum: startP + price,
+            count: 2,
+            min: Math.min(startP, price),
+            max: Math.max(startP, price),
+          };
+        } else {
+          prevSt.sum += price;
+          prevSt.count += 1;
+          if (price < prevSt.min) prevSt.min = price;
+          if (price > prevSt.max) prevSt.max = price;
+        }
       }
 
       if (portfolioRes) {
@@ -765,14 +540,10 @@
           ev.text ||
           key;
 
-        const { tags, clue } = analyzeNewsIntel(headline);
         state.newsList.unshift({
           id: key,
           timeLabel: ev.date || ev.formatted_date || `t=${ev.in_game_starting_time ?? ''}`,
-          tags,
-          clue,
           headline,
-          isArticle: false,
         });
         state.newsVersion++;
       }
@@ -788,14 +559,10 @@
         const headline = [title, body].filter(Boolean).join(' — ');
         if (!headline) continue;
 
-        const { tags, clue } = analyzeNewsIntel(headline);
         state.newsList.unshift({
           id: key,
           timeLabel: art.date || art.published_at || 'Article',
-          tags,
-          clue,
           headline,
-          isArticle: true,
         });
         state.newsVersion++;
       }
