@@ -80,11 +80,106 @@
     mktAvgDriftPct: 0,     // equal-weight % change across all 10 stocks vs Start Price
     cash: 1000000,
     totalValue: 1000000,
-    holdings: {},          // { sym: { qty, avgPrice } }
+    holdings: {},          // { sym: { qty, avgPrice, pnlDollars, pnlPct, totalAmount } }
+    txCostMap: {},         // { sym: { qty, avgPrice } } reconstructed from /transactions
+    pollTick: 0,
     lastPollAt: null,
     lastError: null,
     statusMsg: '',
     timer: null,
+  };
+
+  // Reconstruct exact average purchase/short entry price per stock from transaction history
+  const computeCostBasisFromTransactions = (txRes) => {
+    const list = Array.isArray(txRes)
+      ? txRes
+      : txRes?.transactions || txRes?.data || [];
+    if (!Array.isArray(list) || !list.length) return;
+
+    // Check chronological order: if the first item has a larger ID than the last item, reverse it (newest-first -> oldest-first)
+    const sorted = [...list];
+    if (sorted.length > 1) {
+      const firstId = Number(sorted[0]?.id ?? sorted[0]?.transaction_id ?? 0);
+      const lastId = Number(sorted[sorted.length - 1]?.id ?? sorted[sorted.length - 1]?.transaction_id ?? 0);
+      if (firstId && lastId && firstId > lastId) {
+        sorted.reverse();
+      } else if (sorted[0]?.created_at && sorted[sorted.length - 1]?.created_at) {
+        if (new Date(sorted[0].created_at) > new Date(sorted[sorted.length - 1].created_at)) {
+          sorted.reverse();
+        }
+      }
+    }
+
+    const map = {}; // { sym: { qty: 0, avgPrice: 0 } }
+    for (const tx of sorted) {
+      if (!tx || typeof tx !== 'object') continue;
+      const prodId =
+        tx.financial_product_id ??
+        tx.product_id ??
+        tx.financial_product?.id ??
+        tx.marketable?.id;
+      const fp =
+        tx.financial_product ||
+        state.products.find(
+          (p) =>
+            (prodId !== undefined && String(p.id) === String(prodId)) ||
+            (tx.ticker && (p.short_name === tx.ticker || p.marketable?.ticker === tx.ticker)) ||
+            (tx.short_name && p.short_name === tx.short_name) ||
+            (tx.name && (p.marketable?.name === tx.name || p.name === tx.name))
+        );
+      const sym =
+        tx.short_name ||
+        tx.ticker ||
+        tx.symbol ||
+        tx.financial_product?.short_name ||
+        tx.financial_product?.ticker ||
+        tx.marketable?.ticker ||
+        tx.marketable?.short_name ||
+        fp?.short_name ||
+        fp?.ticker;
+      if (!sym) continue;
+
+      let rawQ = Number(tx.quantity ?? tx.qty ?? tx.shares ?? 0);
+      const unitP = Number(
+        tx.unit_price ??
+          tx.price ??
+          tx.execution_price ??
+          tx.average_price ??
+          (rawQ !== 0 && tx.amount ? Math.abs(Number(tx.amount)) / Math.abs(rawQ) : 0)
+      );
+      if (!rawQ || unitP <= 0) continue;
+
+      const typeStr = String(tx.type ?? tx.side ?? tx.action ?? tx.transaction_type ?? '').toLowerCase();
+      let signedQ = rawQ;
+      if (typeStr.includes('sell') || typeStr.includes('vente') || typeStr.includes('short')) {
+        signedQ = -Math.abs(rawQ);
+      } else if (typeStr.includes('buy') || typeStr.includes('achat')) {
+        signedQ = Math.abs(rawQ);
+      }
+
+      const cur = map[sym] || { qty: 0, avgPrice: 0 };
+      const prevQty = cur.qty;
+      const nextQty = prevQty + signedQ;
+
+      if (nextQty === 0) {
+        cur.qty = 0;
+        cur.avgPrice = 0;
+      } else if (prevQty === 0 || (prevQty > 0 && signedQ > 0) || (prevQty < 0 && signedQ < 0)) {
+        // Opening or adding to the same side -> weighted average entry price
+        const totalCost = Math.abs(prevQty) * cur.avgPrice + Math.abs(signedQ) * unitP;
+        cur.avgPrice = totalCost / Math.abs(nextQty);
+        cur.qty = nextQty;
+      } else if ((prevQty > 0 && nextQty > 0) || (prevQty < 0 && nextQty < 0)) {
+        // Partial close -> entry price stays the same
+        cur.qty = nextQty;
+      } else {
+        // Flipped from long to short or short to long -> new side gets current unitP
+        cur.qty = nextQty;
+        cur.avgPrice = unitP;
+      }
+      map[sym] = cur;
+    }
+    state.txCostMap = map;
   };
 
   const esc = (s) =>
@@ -374,11 +469,15 @@
       const sym = p.short_name || p.ticker;
       const price = Number(p.current_price || 0);
       const h = sym ? state.holdings[sym] : null;
-      if (h && h.qty !== 0 && h.avgPrice > 0) {
+      if (h && h.qty !== 0) {
         openPositionsCount += 1;
-        openPnlDollars += h.qty > 0
-          ? (price - h.avgPrice) * h.qty
-          : (h.avgPrice - price) * Math.abs(h.qty);
+        if (h.pnlDollars !== undefined && h.pnlDollars !== null) {
+          openPnlDollars += h.pnlDollars;
+        } else if (h.avgPrice > 0) {
+          openPnlDollars += h.qty > 0
+            ? (price - h.avgPrice) * h.qty
+            : (h.avgPrice - price) * Math.abs(h.qty);
+        }
       }
     }
     const openCol = openPnlDollars >= 0 ? '#4ade80' : '#f87171';
@@ -475,26 +574,34 @@
         const held = state.holdings[sym];
         const qty = held?.qty || 0;
         let heldLine = '<div style="color:#475569;font-size:10px;">0 sh</div>';
-        if (qty !== 0 && held.avgPrice > 0) {
+        if (qty !== 0) {
+          const entryP = held.avgPrice > 0 ? held.avgPrice : startP;
           const pnlDollars =
-            qty > 0
-              ? (price - held.avgPrice) * qty
-              : (held.avgPrice - price) * Math.abs(qty);
+            held.pnlDollars !== undefined && held.pnlDollars !== null
+              ? held.pnlDollars
+              : qty > 0
+              ? (price - entryP) * qty
+              : (entryP - price) * Math.abs(qty);
           const pnlPct =
-            qty > 0
-              ? ((price - held.avgPrice) / held.avgPrice) * 100
-              : ((held.avgPrice - price) / held.avgPrice) * 100;
-          const pnlCol = pnlDollars >= 0 ? '#4ade80' : '#f87171';
-          const pnlBg = pnlDollars >= 0 ? '#052e16' : '#450a0a';
+            held.pnlPct !== undefined && held.pnlPct !== null
+              ? held.pnlPct
+              : entryP > 0
+              ? qty > 0
+                ? ((price - entryP) / entryP) * 100
+                : ((entryP - price) / entryP) * 100
+              : 0;
+          const pnlCol = pnlDollars > 0 ? '#4ade80' : pnlDollars < 0 ? '#f87171' : '#e2e8f0';
+          const pnlBg = pnlDollars > 0 ? '#052e16' : pnlDollars < 0 ? '#450a0a' : '#1e293b';
           const sideTag = qty > 0 ? 'LONG' : 'SHORT';
+          const posVal = Math.round(Math.abs(qty) * price).toLocaleString();
           heldLine = `
             <div style="font-size:10px;color:#cbd5e1;">
               <span style="color:#38bdf8;font-weight:700;">${qty.toLocaleString()} sh</span>
-              <span style="color:#94a3b8;font-size:9px;">(${sideTag} @$${held.avgPrice.toFixed(2)})</span>
+              <span style="color:#94a3b8;font-size:9px;">(${sideTag} @$${entryP.toFixed(2)} · $${posVal})</span>
             </div>
-            <div style="margin-top:1px;">
-              <span style="background:${pnlBg};color:${pnlCol};padding:1px 4px;border-radius:3px;font-weight:700;font-size:10px;">
-                ${fmtDollarsSigned(pnlDollars)} (${fmtPct(pnlPct)})
+            <div style="margin-top:2px;">
+              <span style="background:${pnlBg};color:${pnlCol};border:1px solid ${pnlCol}44;padding:1px 5px;border-radius:3px;font-weight:700;font-size:10px;display:inline-block;">
+                P&L: ${fmtDollarsSigned(pnlDollars)} (${fmtPct(pnlPct)})
               </span>
             </div>`;
         }
@@ -661,13 +768,21 @@
     isPolling = true;
     try {
       const base = `/resources/simulation/${cfg.simId}`;
-      const [productsRes, portfolioRes] = await Promise.all([
+      state.pollTick += 1;
+      const shouldFetchTx = state.pollTick === 1 || state.pollTick % 2 === 0;
+      const [productsRes, portfolioRes, txRes] = await Promise.all([
         fetchJson(`${base}/financial-products`),
         fetchJson(`${base}/player/${cfg.playerId}/portfolio`),
+        shouldFetchTx
+          ? fetchJson(`${base}/player/${cfg.playerId}/transactions`).catch(() => null)
+          : Promise.resolve(null),
       ]);
 
       const products = Array.isArray(productsRes) ? productsRes : productsRes.data || [];
       state.products = products;
+      if (txRes) {
+        computeCostBasisFromTransactions(txRes);
+      }
       const now = Date.now();
       for (const p of products) {
         const sym = p.short_name || p.ticker;
@@ -704,36 +819,155 @@
         const totalVal = portfolioRes.summary?.total_value ?? portfolioRes.total_value;
         if (totalVal !== undefined) state.totalValue = Number(totalVal);
 
-        const items = portfolioRes.positions || portfolioRes.items || portfolioRes.financial_products || [];
+        const rawPositions =
+          portfolioRes.positions ||
+          portfolioRes.items ||
+          portfolioRes.financial_products ||
+          portfolioRes.data?.positions ||
+          [];
+        const items = Array.isArray(rawPositions)
+          ? rawPositions
+          : rawPositions && typeof rawPositions === 'object'
+          ? Object.values(rawPositions)
+          : [];
+
         const nextHoldings = {};
-        if (Array.isArray(items)) {
-          for (const it of items) {
-            const fp = it.financial_product || state.products.find((p) => p.id === it.financial_product_id);
-            const sym = it.short_name || it.ticker || fp?.short_name || fp?.ticker;
-            const q = Number(it.quantity ?? it.pivot?.quantity ?? 0);
-            const avg = Number(
-              it.average_price ??
-                it.avg_price ??
-                it.purchase_price ??
-                it.unit_price ??
-                it.pivot?.average_price ??
-                it.pivot?.unit_price ??
-                fp?.current_price ??
-                0
+        for (const it of items) {
+          if (!it || typeof it !== 'object') continue;
+          const prodId =
+            it.financial_product_id ??
+            it.product_id ??
+            it.financial_product?.id ??
+            it.marketable?.id;
+          const fp =
+            it.financial_product ||
+            state.products.find(
+              (p) =>
+                (prodId !== undefined && String(p.id) === String(prodId)) ||
+                (it.ticker && (p.short_name === it.ticker || p.marketable?.ticker === it.ticker)) ||
+                (it.short_name && p.short_name === it.short_name) ||
+                (it.name && (p.marketable?.name === it.name || p.name === it.name))
             );
-            if (sym && q !== 0) {
-              const prevHeld = state.holdings[sym];
-              // Preserve or update entry price
-              const finalAvg =
-                avg > 0
-                  ? avg
-                  : prevHeld && prevHeld.qty === q && prevHeld.avgPrice > 0
-                  ? prevHeld.avgPrice
-                  : Number(fp?.current_price || 0);
-              nextHoldings[sym] = { qty: q, avgPrice: finalAvg };
+          const sym =
+            it.short_name ||
+            it.ticker ||
+            it.symbol ||
+            it.financial_product?.short_name ||
+            it.financial_product?.ticker ||
+            it.marketable?.ticker ||
+            it.marketable?.short_name ||
+            fp?.short_name ||
+            fp?.ticker;
+          const q = Number(
+            it.quantity ??
+              it.qty ??
+              it.shares ??
+              it.pivot?.quantity ??
+              it.position ??
+              0
+          );
+          if (!sym || q === 0) continue;
+
+          const livePrice = Number(fp?.current_price ?? it.current_price ?? it.unit_price ?? 0);
+          const txBasis = state.txCostMap[sym];
+          const prevHeld = state.holdings[sym];
+
+          // 1. Check if portfolio payload gives explicit average / purchase price or cost basis
+          const explicitAvg = Number(
+            it.average_price ??
+              it.avg_price ??
+              it.purchase_price ??
+              it.buy_price ??
+              it.entry_price ??
+              it.cost_basis_per_share ??
+              it.pivot?.average_price ??
+              it.pivot?.unit_price ??
+              0
+          );
+          const explicitCostTotal = Number(
+            it.cost_basis ?? it.book_value ?? it.invested_amount ?? it.initial_value ?? 0
+          );
+
+          // 2. Determine true entry price (priority: explicitAvg -> explicitCostTotal/q -> /transactions cost basis -> previous tracked entry -> livePrice)
+          let entryPrice = 0;
+          if (explicitAvg > 0) {
+            entryPrice = explicitAvg;
+          } else if (explicitCostTotal > 0) {
+            entryPrice = explicitCostTotal / Math.abs(q);
+          } else if (txBasis && txBasis.avgPrice > 0) {
+            entryPrice = txBasis.avgPrice;
+          } else if (prevHeld && prevHeld.avgPrice > 0) {
+            if (prevHeld.qty === q) {
+              entryPrice = prevHeld.avgPrice;
+            } else if ((prevHeld.qty > 0 && q > prevHeld.qty) || (prevHeld.qty < 0 && q < prevHeld.qty)) {
+              const added = Math.abs(q - prevHeld.qty);
+              entryPrice =
+                (Math.abs(prevHeld.qty) * prevHeld.avgPrice + added * livePrice) / Math.abs(q);
+            } else {
+              entryPrice = prevHeld.avgPrice;
             }
+          } else {
+            entryPrice = livePrice;
+          }
+
+          // 3. Check if portfolio payload provides explicit unrealized profit/loss or total position value
+          const explicitPnl =
+            it.profit_loss ??
+            it.pnl ??
+            it.unrealized_pnl ??
+            it.gain ??
+            it.return_amount ??
+            null;
+          const posAmount = Number(it.amount ?? it.total_value ?? it.value ?? it.market_value ?? 0);
+          let pnlDollars = 0;
+          if (explicitPnl !== null && explicitPnl !== undefined) {
+            pnlDollars = Number(explicitPnl);
+          } else if (entryPrice > 0) {
+            pnlDollars =
+              q > 0
+                ? (livePrice - entryPrice) * q
+                : (entryPrice - livePrice) * Math.abs(q);
+          } else if (posAmount !== 0) {
+            pnlDollars = q > 0 ? posAmount - livePrice * q : livePrice * Math.abs(q) - Math.abs(posAmount);
+          }
+          const pnlPct =
+            entryPrice > 0
+              ? q > 0
+                ? ((livePrice - entryPrice) / entryPrice) * 100
+                : ((entryPrice - livePrice) / entryPrice) * 100
+              : 0;
+
+          nextHoldings[sym] = {
+            qty: q,
+            avgPrice: entryPrice,
+            pnlDollars,
+            pnlPct,
+          };
+        }
+
+        // Fallback: if portfolioRes.positions was empty or unmapped, also include any non-zero positions from /transactions
+        for (const [sym, basis] of Object.entries(state.txCostMap)) {
+          if (!nextHoldings[sym] && basis.qty !== 0 && basis.avgPrice > 0) {
+            const fp = state.products.find((p) => (p.short_name || p.ticker) === sym);
+            const livePrice = Number(fp?.current_price || basis.avgPrice);
+            const q = basis.qty;
+            const pnlDollars =
+              q > 0
+                ? (livePrice - basis.avgPrice) * q
+                : (basis.avgPrice - livePrice) * Math.abs(q);
+            const pnlPct =
+              q > 0
+                ? ((livePrice - basis.avgPrice) / basis.avgPrice) * 100
+                : ((basis.avgPrice - livePrice) / basis.avgPrice) * 100;
+            nextHoldings[sym] = {
+              qty: q,
+              avgPrice: basis.avgPrice,
+              pnlDollars,
+              pnlPct,
+            };
           }
         }
+
         state.holdings = nextHoldings;
       }
 
