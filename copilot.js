@@ -18,14 +18,15 @@
     window.__BOURSIFY_COPILOT__.destroy();
   }
 
-  const STORAGE_KEY = 'boursify_copilot_cfg_v5';
+  const STORAGE_KEY = 'boursify_copilot_cfg_v6';
   const defaultCfg = {
     simId: '448',
     playerId: '38158',
     pollMs: 2000,
     prefillEnabled: false,
-    allocPct: 20,       // 20% of TOTAL PORTFOLIO VALUE
+    allocPct: 20,        // 20% of TOTAL PORTFOLIO VALUE
     roundMode: true,
+    avgMode: 'BLENDED',  // 'BLENDED' (Roll 3m + Mkt Drift) | 'ROLLING' (3m Moving Avg) | 'MARKET' (vs 10-Stock Market Avg)
     sortMode: 'DEFAULT', // 'DEFAULT' | 'DOWN' | 'UP'
     wideMode: true,
     minimized: false,
@@ -75,7 +76,8 @@
   const state = {
     products: [],
     priceHistory: {},      // { sym: [{ t, p }] } up to 3 minutes
-    sessionStats: {},      // { sym: { sum, count, min, max } }
+    sessionStats: {},      // { sym: { sum, count, min, max, ema } }
+    mktAvgDriftPct: 0,     // equal-weight % change across all 10 stocks vs Start Price
     cash: 1000000,
     totalValue: 1000000,
     holdings: {},          // { sym: { qty, avgPrice } }
@@ -113,8 +115,25 @@
     return ref > 0 ? ((currentPrice - ref) / ref) * 100 : 0;
   };
 
-  // Compute comprehensive price data points for a stock
-  const getPriceMetrics = (p) => {
+  // Compute equal-weight 10-stock market average drift % from Start Price
+  const computeMarketDriftPct = () => {
+    if (!state.products.length) return 0;
+    let sumPct = 0;
+    let count = 0;
+    for (const p of state.products) {
+      const sym = p.short_name || p.ticker || '?';
+      const price = Number(p.current_price || 0);
+      const startP = Number(p.marketable?.starting_price || START_PRICES[sym] || price);
+      if (price > 0 && startP > 0) {
+        sumPct += ((price - startP) / startP) * 100;
+        count += 1;
+      }
+    }
+    return count > 0 ? sumPct / count : 0;
+  };
+
+  // Compute comprehensive drift-adjusted price data points for a stock
+  const getPriceMetrics = (p, mktDriftPct) => {
     const sym = p.short_name || p.ticker || '?';
     const price = Number(p.current_price || 0);
     const m = p.marketable || {};
@@ -124,9 +143,34 @@
     const st = state.sessionStats[sym];
     const sessionAvg = st && st.count > 0 ? st.sum / st.count : price;
 
-    // Reference Average: blend MA50 (if valid), Start Price, and Session Average
-    const refAvg = ma50 > 0 ? (ma50 + sessionAvg) / 2 : (startP + sessionAvg) / 2;
-    const vsAvgPct = refAvg > 0 ? ((price - refAvg) / refAvg) * 100 : 0;
+    // 1. Rolling 3-minute Moving Average (moves up as the stock drifts up over time)
+    const hist = state.priceHistory[sym] || [];
+    const roll3mAvg =
+      hist.length > 0
+        ? hist.reduce((acc, pt) => acc + pt.p, 0) / hist.length
+        : st?.ema || sessionAvg;
+    const vsRollPct = roll3mAvg > 0 ? ((price - roll3mAvg) / roll3mAvg) * 100 : 0;
+
+    // 2. Market-Drift Adjusted Average Price (what this stock's price would be if it moved with the 10-stock average)
+    const mktExpectedPrice = startP * (1 + mktDriftPct / 100);
+    const vsMktPct =
+      mktExpectedPrice > 0 ? ((price - mktExpectedPrice) / mktExpectedPrice) * 100 : 0;
+
+    // 3. Blended Drift-Proof Average (50% Rolling 3m Moving Avg + 50% Market-Drift Expected Price)
+    const blendedAvg = (roll3mAvg + mktExpectedPrice) / 2;
+    const vsBlendedPct = blendedAvg > 0 ? ((price - blendedAvg) / blendedAvg) * 100 : 0;
+
+    // Select active average based on cfg.avgMode
+    let refAvg = blendedAvg;
+    let vsAvgPct = vsBlendedPct;
+    if (cfg.avgMode === 'ROLLING') {
+      refAvg = roll3mAvg;
+      vsAvgPct = vsRollPct;
+    } else if (cfg.avgMode === 'MARKET') {
+      refAvg = mktExpectedPrice;
+      vsAvgPct = vsMktPct;
+    }
+
     const vsStartPct = startP > 0 ? ((price - startP) / startP) * 100 : 0;
     const vsMa50Pct = ma50 > 0 ? ((price - ma50) / ma50) * 100 : vsAvgPct;
 
@@ -147,6 +191,12 @@
       ma50,
       ma200,
       sessionAvg,
+      roll3mAvg,
+      vsRollPct,
+      mktExpectedPrice,
+      vsMktPct,
+      blendedAvg,
+      vsBlendedPct,
       refAvg,
       vsAvgPct,
       vsStartPct,
@@ -274,14 +324,15 @@
         </div>
         <span id="bc-budget-pill" style="color:#38bdf8;font-weight:700;font-size:11px;">= $200,000</span>
         <div style="display:flex;gap:4px;">
+          <button id="bc-avg-mode" title="Switch Average Basis (accounts for upward market drift)" style="background:#0284c7;color:#e2e8f0;border:none;border-radius:4px;padding:2px 7px;cursor:pointer;font-size:10px;font-weight:600;">Avg: Drift+3m</button>
           <button id="bc-sort" style="background:#334155;color:#e2e8f0;border:none;border-radius:4px;padding:2px 7px;cursor:pointer;font-size:10px;font-weight:600;">Sort: Default</button>
           <button id="bc-toggle-round" style="background:#2563eb;color:#e2e8f0;border:none;border-radius:4px;padding:2px 7px;cursor:pointer;font-size:10px;">Round: ON</button>
         </div>
       </div>
-      <div style="display:grid;grid-template-columns:0.85fr 1.15fr 1.15fr 1.05fr;font-weight:700;font-size:10px;color:#94a3b8;padding:0 2px;">
+      <div style="display:grid;grid-template-columns:0.85fr 1.15fr 1.2fr 1.0fr;font-weight:700;font-size:10px;color:#94a3b8;padding:0 2px;">
         <span>STOCK / HELD</span>
-        <span style="text-align:right;">PRICE · AVG · START</span>
-        <span style="text-align:right;">HOW DOWN / UP (RANGE)</span>
+        <span style="text-align:right;">PRICE · DRIFT AVG</span>
+        <span style="text-align:right;">UP / DOWN vs AVERAGE</span>
         <span id="bc-col-sh-hdr" style="text-align:right;">${cfg.allocPct}% PORT SHARES</span>
       </div>
       <div id="bc-quotes-list" style="overflow-y:auto;max-height:540px;padding-right:2px;"></div>
@@ -297,6 +348,7 @@
   const elBody = root.querySelector('#bc-body');
   const elAlloc = root.querySelector('#bc-alloc');
   const elBudgetPill = root.querySelector('#bc-budget-pill');
+  const elAvgModeBtn = root.querySelector('#bc-avg-mode');
   const elSortBtn = root.querySelector('#bc-sort');
   const elRoundBtn = root.querySelector('#bc-toggle-round');
   const elColShHdr = root.querySelector('#bc-col-sh-hdr');
@@ -308,15 +360,22 @@
     const targetDollars = Math.round(state.totalValue * (pct / 100));
     const retPct = ((state.totalValue - 1000000) / 1000000) * 100;
     const retCol = retPct >= 0 ? '#4ade80' : '#f87171';
+    const mktCol = state.mktAvgDriftPct >= 0 ? '#4ade80' : '#f87171';
 
     elStatus.textContent = state.statusMsg ? `(${state.statusMsg})` : '';
-    elCash.innerHTML = `Total: <b>$${Math.round(state.totalValue).toLocaleString()}</b> <span style="color:${retCol}">(${retPct >= 0 ? '+' : ''}${retPct.toFixed(2)}%)</span> · Cash: <b>$${Math.round(state.cash).toLocaleString()}</b> · ${
+    elCash.innerHTML = `Total: <b>$${Math.round(state.totalValue).toLocaleString()}</b> <span style="color:${retCol}">(${retPct >= 0 ? '+' : ''}${retPct.toFixed(2)}%)</span> · Cash: <b>$${Math.round(state.cash).toLocaleString()}</b> · Mkt Drift: <b style="color:${mktCol}">${state.mktAvgDriftPct >= 0 ? '+' : ''}${state.mktAvgDriftPct.toFixed(1)}%</b> · ${
       state.lastError
         ? `<span style="color:#f87171">${esc(state.lastError)}</span>`
         : esc(state.lastPollAt || '...')
     }`;
     elBudgetPill.textContent = `= $${targetDollars.toLocaleString()}`;
     elColShHdr.textContent = `${pct}% PORT SHARES`;
+    elAvgModeBtn.textContent =
+      cfg.avgMode === 'ROLLING'
+        ? 'Avg: Roll 3m'
+        : cfg.avgMode === 'MARKET'
+        ? 'Avg: Mkt Drift'
+        : 'Avg: Drift+3m';
     elRoundBtn.textContent = `Round: ${cfg.roundMode ? 'ON' : 'Exact'}`;
     elRoundBtn.style.background = cfg.roundMode ? '#2563eb' : '#334155';
     elSortBtn.textContent =
@@ -342,7 +401,8 @@
       return;
     }
 
-    const enriched = state.products.map((p) => ({ p, m: getPriceMetrics(p) }));
+    const mktDriftPct = state.mktAvgDriftPct;
+    const enriched = state.products.map((p) => ({ p, m: getPriceMetrics(p, mktDriftPct) }));
     if (cfg.sortMode === 'DOWN') {
       enriched.sort((a, b) => a.m.vsAvgPct - b.m.vsAvgPct);
     } else if (cfg.sortMode === 'UP') {
@@ -357,6 +417,8 @@
           startP,
           refAvg,
           vsAvgPct,
+          vsRollPct,
+          vsMktPct,
           vsStartPct,
           hi,
           lo,
@@ -368,17 +430,27 @@
           chg3m,
         } = m;
 
-        // Mean-reversion classification:
-        // Down below average (<= -2%) -> DIP (BUY); Up above average (>= +2%) -> PEAK (SHORT / SELL)
-        const isDip = vsAvgPct <= -2.0;
-        const isPeak = vsAvgPct >= 2.0;
-        const signalBadge = isDip
-          ? `<span style="background:#14532d;color:#4ade80;padding:1px 5px;border-radius:3px;font-weight:700;font-size:10px;">▼ DOWN ${vsAvgPct.toFixed(1)}% (BUY DIP)</span>`
-          : isPeak
-          ? `<span style="background:#7f1d1d;color:#fca5a5;padding:1px 5px;border-radius:3px;font-weight:700;font-size:10px;">▲ UP +${vsAvgPct.toFixed(1)}% (SHORT/SELL)</span>`
-          : `<span style="background:#1e293b;color:#94a3b8;padding:1px 5px;border-radius:3px;font-size:10px;">vs Avg ${fmtPct(vsAvgPct)}</span>`;
+        // Every stock gets an explicit UP or DOWN vs Average badge (adjusted for upward drift):
+        // Strong DIP (<= -1.5%) -> bright green BUY DIP; Mild DOWN (< 0%) -> green DOWN vs Avg
+        // Strong PEAK (>= +1.5%) -> bright red SHORT/SELL; Mild UP (>= 0%) -> amber/red UP vs Avg
+        const isStrongDip = vsAvgPct <= -1.5;
+        const isStrongPeak = vsAvgPct >= 1.5;
+        const isDown = vsAvgPct < 0;
+
+        let signalBadge = '';
+        if (isStrongDip) {
+          signalBadge = `<span style="background:#14532d;color:#4ade80;padding:1px 5px;border-radius:3px;font-weight:700;font-size:10px;">▼ DOWN ${vsAvgPct.toFixed(1)}% vs Avg (BUY DIP)</span>`;
+        } else if (isDown) {
+          signalBadge = `<span style="background:#064e3b;color:#6ee7b7;padding:1px 5px;border-radius:3px;font-weight:600;font-size:10px;">▼ DOWN ${vsAvgPct.toFixed(1)}% vs Avg</span>`;
+        } else if (isStrongPeak) {
+          signalBadge = `<span style="background:#7f1d1d;color:#fca5a5;padding:1px 5px;border-radius:3px;font-weight:700;font-size:10px;">▲ UP +${vsAvgPct.toFixed(1)}% vs Avg (SHORT)</span>`;
+        } else {
+          signalBadge = `<span style="background:#451a03;color:#fcd34d;padding:1px 5px;border-radius:3px;font-weight:600;font-size:10px;">▲ UP +${vsAvgPct.toFixed(1)}% vs Avg</span>`;
+        }
 
         const vsStartCol = vsStartPct > 0.1 ? '#4ade80' : vsStartPct < -0.1 ? '#f87171' : '#94a3b8';
+        const cRoll = vsRollPct < -0.1 ? '#4ade80' : vsRollPct > 0.1 ? '#f87171' : '#94a3b8';
+        const cMkt = vsMktPct < -0.1 ? '#4ade80' : vsMktPct > 0.1 ? '#f87171' : '#94a3b8';
         const c30 = chg30s > 0.05 ? '#4ade80' : chg30s < -0.05 ? '#f87171' : '#94a3b8';
         const c1m = chg1m > 0.05 ? '#4ade80' : chg1m < -0.05 ? '#f87171' : '#94a3b8';
         const c3m = chg3m > 0.05 ? '#4ade80' : chg3m < -0.05 ? '#f87171' : '#94a3b8';
@@ -408,12 +480,12 @@
           : '';
 
         // Visual Low-to-High Range Bar
-        const barCol = isDip ? '#4ade80' : isPeak ? '#f87171' : '#38bdf8';
+        const barCol = isStrongDip ? '#4ade80' : isStrongPeak ? '#f87171' : '#38bdf8';
         const rangeBar = `<div style="width:100%;height:4px;background:#1e293b;border-radius:2px;margin:2px 0;position:relative;overflow:hidden;">
           <div style="width:${rangePos.toFixed(0)}%;height:100%;background:${barCol};"></div>
         </div>`;
 
-        return `<div style="display:grid;grid-template-columns:0.85fr 1.15fr 1.15fr 1.05fr;align-items:center;gap:4px;padding:5px 2px;border-bottom:1px solid #1e293b;">
+        return `<div style="display:grid;grid-template-columns:0.85fr 1.15fr 1.2fr 1.0fr;align-items:center;gap:4px;padding:5px 2px;border-bottom:1px solid #1e293b;">
           <div>
             <div style="font-weight:700;font-size:12px;">${esc(sym)}</div>
             ${heldLine}
@@ -427,6 +499,9 @@
           </div>
           <div style="text-align:right;font-variant-numeric:tabular-nums;">
             <div>${signalBadge}</div>
+            <div style="font-size:9px;color:#94a3b8;margin-top:1px;">
+              vs 3m Avg <span style="color:${cRoll};font-weight:600;">${fmtPct(vsRollPct)}</span> · vs Mkt <span style="color:${cMkt};font-weight:600;">${fmtPct(vsMktPct)}</span>
+            </div>
             ${rangeBar}
             <div style="font-size:9px;color:#94a3b8;">
               Lo $${lo.toFixed(1)} (<span style="color:#4ade80">+${offLowPct.toFixed(1)}%</span>) · Hi $${hi.toFixed(1)} (<span style="color:#f87171">${offHighPct.toFixed(1)}%</span>)
@@ -479,6 +554,14 @@
 
   root.querySelectorAll('[data-pct]').forEach((btn) => {
     btn.addEventListener('click', () => setAllocPct(btn.getAttribute('data-pct')));
+  });
+
+  elAvgModeBtn.addEventListener('click', () => {
+    cfg.avgMode =
+      cfg.avgMode === 'BLENDED' ? 'ROLLING' : cfg.avgMode === 'ROLLING' ? 'MARKET' : 'BLENDED';
+    saveCfg();
+    renderHeader();
+    renderQuotes();
   });
 
   elSortBtn.addEventListener('click', () => {
@@ -570,14 +653,17 @@
             count: 2,
             min: Math.min(startP, price),
             max: Math.max(startP, price),
+            ema: price,
           };
         } else {
           prevSt.sum += price;
           prevSt.count += 1;
+          prevSt.ema = prevSt.ema * 0.92 + price * 0.08;
           if (price < prevSt.min) prevSt.min = price;
           if (price > prevSt.max) prevSt.max = price;
         }
       }
+      state.mktAvgDriftPct = computeMarketDriftPct();
 
       if (portfolioRes) {
         const cashVal = portfolioRes.summary?.cash_balance ?? portfolioRes.current_cash;
